@@ -1,0 +1,12 @@
+# AI collaboration work log
+
+Working notes for the final, brief-required `ai-collaboration-summary.md`. The final summary must use the exact prompt in `instructions/README.md` and stay at or below 500 words. This log records evidence, not a claim that the human wrote AI-generated code.
+
+| Date | Human direction or correction | AI contribution and observed result |
+| --- | --- | --- |
+| 2026-09-24 | Asked for a senior-level Python take-home with all three phases, credential encryption from the initial design, and credible large-file behavior. Asked for intent and requirements docs, then supplied two outside reviews for critique. | Drafted and revised `intent.md` and `spec.md`; narrowed same-file behavior, set one-process SQLite scope, documented crash staging, error semantics, fixture setup, and measured-performance caveats. These docs predate Git initialization; commit `60dacac` records their state without pretending to show earlier revisions. |
+| 2026-09-24 | Authorized isolated Docker/SFTP verification and asked what else was needed. | Tested the supplied image on Docker Desktop: upload, download, rename, and delete matched SHA-256. Verified amd64 emulation, changing host keys without persistence, and stable keys with a named `/etc/ssh` volume. Updated the spec; removed the disposable test project. |
+| 2026-09-24 | Directed a separate repository with honest spec and guardrail commits; invited pushback on empty skeleton files. | Recommended executable scaffolding over empty placeholders. Created commits `21b1bf6` (supplied brief), `60dacac` (draft intent/spec), `757d090` (API contract), `0374290` (agent rules/evidence map), and `291027c` (runnable scaffold). Scaffold verification: Ruff clean, one pytest check passed, and live Uvicorn served `/openapi.json`. |
+| 2026-09-24 | Authorized implementation and asked for deterministic requirement checks. | Commit `8cbdb41` added SQLite connections, Fernet encryption, local listing/staged writes, typed API errors, and tests. `make check` passed nine tests after this slice. SFTP connector work is in progress and has not yet passed integration. |
+
+Before final submission, update this log with subsequent implementation, failures and fixes, benchmark evidence, any human overrides, and 2–3 concrete prompt-to-output examples. Keep passwords, encryption keys, and private environment details out of this file.
