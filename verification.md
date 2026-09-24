@@ -13,7 +13,7 @@ Status is **planned**, **partial**, or **verified**. Update this table with the 
 | R7 | `test_connection_errors_are_structured`, `test_sftp_failures_have_distinct_safe_codes`, `test_transfer_rejects_same_file_and_reports_missing_source`, and `test_api_failed_sftp_transfer_has_retrievable_record` check stable errors and transfer IDs | Verified |
 | R8 | `test_supplied_csv_and_json_preview`, `test_preview_inference_empty_mixed_and_malformed`, and `test_sftp_preview_uses_shared_parser` check types, empty/mixed values, malformed input, and SFTP parity | Verified |
 | R9 | Local and SFTP success, bad password, unavailable server, missing root, and unreadable root checked in `test_connections.py` and `test_sftp_integration.py` | Verified |
-| R10 | Reproducible 16 MiB and 256 MiB transfers, SHA-256, time, throughput, peak RSS, platform | Planned |
+| R10 | `make benchmark`, [raw results](docs/benchmark-results.json), and [measurement notes](docs/benchmark.md): 16/256 MiB both ways, matching SHA-256, end-to-end duration, throughput, peak RSS, platform/emulation, and an explicitly untested 1 GiB estimate | Verified |
 | R11 | `test_connector_contract_at_chunk_boundaries` runs identical empty/boundary-size read/write, collision, overwrite, cleanup, and escape cases against local and SFTP; other tests cover local symlink escape and publish-time SFTP collision | Verified |
 | R12 | `/openapi.json` served in `test_openapi_is_served` and a real Uvicorn request; main route contract pending | Partial |
 | R13 | Ciphertext/redaction and wrong/missing key: `test_connections.py`; SFTP use after store restart: `test_sftp_roundtrip_collision_and_explicit_overwrite`; final log review pending | Partial |

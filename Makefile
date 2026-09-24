@@ -1,4 +1,4 @@
-.PHONY: check integration run
+.PHONY: check integration benchmark run
 
 check:
 	uv run --extra dev ruff check .
@@ -7,6 +7,9 @@ check:
 
 integration:
 	uv run --extra dev pytest -m integration
+
+benchmark:
+	@uv run --extra dev python scripts/benchmark.py
 
 run:
 	uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1

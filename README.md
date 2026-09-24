@@ -23,3 +23,11 @@ make integration
 Capturing the key presented at `127.0.0.1:2222` is an explicit trust-on-first-use step for this local fixture. The application rejects any other key. `make integration` checks real SFTP read, write, overwrite, collision, transfers, preview, healthcheck, and error cases. Start the API with `make run`; it serves `/openapi.json` and `/docs`. Connection creation, inspection, local/SFTP listing, bounded CSV/JSON preview, healthcheck, and synchronous transfers are implemented.
 
 The root Compose file preserves generated SSH host keys in a named volume across normal container recreation. `docker compose down -v` deletes that volume and requires a new local known-hosts bootstrap. This image is amd64 and runs under emulation on ARM hosts; benchmark results must identify the platform.
+
+## Large-file evidence
+
+`make benchmark` transfers 16 MiB and 256 MiB in both directions, checks SHA-256,
+and reports end-to-end duration, throughput, and process peak memory. The
+[measured results and limits](docs/benchmark.md) explain the macOS arm64 / Docker
+amd64-emulation setup. The 256 MiB run kept Python process peak RSS under 69 MiB;
+it does not establish a universal transfer-size limit.
