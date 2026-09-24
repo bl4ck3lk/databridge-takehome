@@ -6,4 +6,4 @@ check:
 	uv run --extra dev pytest -m "not integration"
 
 run:
-	uv run uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1
+	uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1
