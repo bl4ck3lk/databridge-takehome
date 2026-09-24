@@ -8,16 +8,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from databridge.config import Settings
-from databridge.connectors.local import LocalConnector
-from databridge.connectors.sftp import SFTPConnector
+from databridge.connectors import connector_for
 from databridge.errors import DataBridgeError
 from databridge.models import (
     ConnectionInput,
     ConnectionView,
     FileList,
     LocalConnection,
+    TransferRecord,
+    TransferRequest,
 )
 from databridge.store import ConnectionStore
+from databridge.transfer import TransferService
 
 _HTTP_STATUS = {
     "INVALID_CONNECTION_SETTINGS": 400,
@@ -28,6 +30,11 @@ _HTTP_STATUS = {
     "DESTINATION_EXISTS": 409,
     "CONNECTION_ROOT_UNAVAILABLE": 503,
     "LOCAL_IO_ERROR": 500,
+    "SAME_FILE": 400,
+    "TRANSFER_NOT_FOUND": 404,
+    "SOURCE_READ_FAILED": 500,
+    "DESTINATION_WRITE_FAILED": 500,
+    "TRANSFER_INTERNAL_ERROR": 500,
     "SFTP_AUTH_FAILED": 502,
     "SFTP_HOST_KEY_REJECTED": 502,
     "SFTP_OPERATION_FAILED": 502,
@@ -35,10 +42,12 @@ _HTTP_STATUS = {
 }
 
 
-def _error_response(status_code: int, code: str, message: str) -> JSONResponse:
+def _error_response(
+    status_code: int, code: str, message: str, transfer_id: str | None = None
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
-        content={"error": {"code": code, "message": message, "transfer_id": None}},
+        content={"error": {"code": code, "message": message, "transfer_id": transfer_id}},
     )
 
 
@@ -58,7 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.exception_handler(DataBridgeError)
     def domain_error(_request: Request, exc: DataBridgeError) -> JSONResponse:
-        return _error_response(_HTTP_STATUS[exc.code], exc.code, exc.message)
+        return _error_response(_HTTP_STATUS[exc.code], exc.code, exc.message, exc.transfer_id)
 
     @application.exception_handler(RequestValidationError)
     def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -99,12 +108,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/connections/{name}/files", response_model=FileList)
     def list_files(name: str, request: Request) -> FileList:
         item = request.app.state.store.get(name)
-        if item.type == "local":
-            connector = LocalConnector(Path(item.path))
-        else:
-            connector = SFTPConnector(item, request.app.state.settings.known_hosts_path)
+        connector = connector_for(item, request.app.state.settings.known_hosts_path)
         listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
+
+    @application.post(
+        "/transfers", response_model=TransferRecord, status_code=status.HTTP_201_CREATED
+    )
+    def transfer_file(item: TransferRequest, request: Request) -> TransferRecord:
+        service = TransferService(
+            request.app.state.store,
+            lambda connection: connector_for(
+                connection, request.app.state.settings.known_hosts_path
+            ),
+        )
+        return service.run(item)
+
+    @application.get("/transfers/{transfer_id}", response_model=TransferRecord)
+    def get_transfer(transfer_id: str, request: Request) -> TransferRecord:
+        return request.app.state.store.get_transfer(transfer_id)
 
     return application
 

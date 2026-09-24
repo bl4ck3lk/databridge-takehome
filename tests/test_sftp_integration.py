@@ -1,5 +1,6 @@
 """Real SFTP tests; run with the documented Docker fixture and known-hosts bootstrap."""
 
+import hashlib
 import shutil
 from pathlib import Path
 from uuid import uuid4
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from databridge.api import create_app
 from databridge.config import Settings
+from databridge.connectors.base import CHUNK_SIZE
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
 
@@ -130,3 +132,100 @@ def test_sftp_failures_have_distinct_safe_codes(trusted_settings: Settings) -> N
         assert client.get("/connections/bad_root/files").json()["error"]["code"] == (
             "SFTP_HOST_KEY_REJECTED"
         )
+
+
+def test_api_transfers_binary_both_directions_and_preserves_collision(
+    trusted_settings: Settings, tmp_path: Path
+) -> None:
+    source_root = tmp_path / "source"
+    target_root = tmp_path / "target"
+    source_root.mkdir()
+    target_root.mkdir()
+    payload = bytes(range(256)) * (CHUNK_SIZE // 256) + b"tail"
+    (source_root / "source.bin").write_bytes(payload)
+    remote_name = f"api-{uuid4().hex}.bin"
+    host_file = PROJECT_ROOT / "sftp_data" / remote_name
+    try:
+        with TestClient(create_app(trusted_settings)) as client:
+            assert (
+                client.post(
+                    "/connections",
+                    json={"name": "source", "type": "local", "path": str(source_root)},
+                ).status_code
+                == 201
+            )
+            assert (
+                client.post(
+                    "/connections",
+                    json={"name": "target", "type": "local", "path": str(target_root)},
+                ).status_code
+                == 201
+            )
+            assert client.post("/connections", json=_request("remote")).status_code == 201
+
+            upload = {
+                "source": "source",
+                "source_file": "source.bin",
+                "destination": "remote",
+                "destination_file": remote_name,
+            }
+            uploaded = client.post("/transfers", json=upload)
+            assert uploaded.status_code == 201
+            assert uploaded.json()["bytes_copied"] == len(payload)
+            assert uploaded.json()["status"] == "completed"
+            assert (
+                hashlib.sha256(host_file.read_bytes()).digest() == hashlib.sha256(payload).digest()
+            )
+
+            collision = client.post("/transfers", json=upload)
+            assert collision.status_code == 409
+            assert collision.json()["error"]["code"] == "DESTINATION_EXISTS"
+            assert host_file.read_bytes() == payload
+
+            downloaded = client.post(
+                "/transfers",
+                json={
+                    "source": "remote",
+                    "source_file": remote_name,
+                    "destination": "target",
+                    "destination_file": "download.bin",
+                },
+            )
+            assert downloaded.status_code == 201
+            assert downloaded.json()["bytes_copied"] == len(payload)
+            assert (target_root / "download.bin").read_bytes() == payload
+            assert client.get(f"/transfers/{downloaded.json()['id']}").json() == (downloaded.json())
+    finally:
+        host_file.unlink(missing_ok=True)
+
+
+def test_api_failed_sftp_transfer_has_retrievable_record(
+    trusted_settings: Settings, tmp_path: Path
+) -> None:
+    (tmp_path / "source.bin").write_bytes(b"contents")
+    with TestClient(create_app(trusted_settings)) as client:
+        assert (
+            client.post(
+                "/connections", json={"name": "source", "type": "local", "path": str(tmp_path)}
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post("/connections", json=_request("server_down", port=22345)).status_code == 201
+        )
+        failed = client.post(
+            "/transfers",
+            json={
+                "source": "source",
+                "source_file": "source.bin",
+                "destination": "server_down",
+                "destination_file": "unpublished.bin",
+            },
+        )
+        assert failed.status_code == 503
+        assert failed.json()["error"]["code"] == "SFTP_UNAVAILABLE"
+        transfer_id = failed.json()["error"]["transfer_id"]
+        assert transfer_id
+        record = client.get(f"/transfers/{transfer_id}").json()
+        assert record["status"] == "failed"
+        assert record["failed_at"] and record["bytes_copied"] == 0

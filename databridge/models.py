@@ -48,3 +48,26 @@ class FileList(BaseModel):
     connection: str
     files: list[str]
     truncated: bool
+
+
+class TransferRequest(BaseModel):
+    source: ConnectionName
+    source_file: str = Field(min_length=1)
+    destination: ConnectionName
+    destination_file: str = Field(min_length=1)
+    overwrite: bool = False
+
+
+class TransferRecord(BaseModel):
+    id: str
+    source: str
+    source_file: str
+    destination: str
+    destination_file: str
+    status: Literal["running", "completed", "failed"]
+    started_at: str
+    completed_at: str | None
+    failed_at: str | None
+    bytes_copied: int
+    failure_phase: str | None
+    error: str | None

@@ -65,7 +65,7 @@ Errors use `{"error":{"code":"FILE_NOT_FOUND","message":"File not found","transf
 | 409 | `CONNECTION_EXISTS`, `DESTINATION_EXISTS` |
 | 502 | `SFTP_AUTH_FAILED`, `SFTP_HOST_KEY_REJECTED`, `SFTP_OPERATION_FAILED` |
 | 503 | `SFTP_UNAVAILABLE`, `CONNECTION_ROOT_UNAVAILABLE` |
-| 500 | `LOCAL_IO_ERROR`, `TRANSFER_INTERNAL_ERROR` |
+| 500 | `LOCAL_IO_ERROR`, `SOURCE_READ_FAILED`, `DESTINATION_WRITE_FAILED`, `TRANSFER_INTERNAL_ERROR` |
 
 Avoid raw stack traces and secrets in error messages or logs. A remote authentication failure must not be reported as failure of the API caller's authentication. Keep the error mapper in the API boundary and raise typed domain/connector errors below it.
 

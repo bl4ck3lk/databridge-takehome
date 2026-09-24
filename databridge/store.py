@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -15,9 +16,15 @@ from databridge.models import (
     LocalConnectionView,
     SFTPConnection,
     SFTPConnectionView,
+    TransferRecord,
+    TransferRequest,
 )
 
 _KEY_CHECK = b"databridge-key-check-v1"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ConnectionStore:
@@ -53,6 +60,22 @@ class ConnectionStore:
                     password_ciphertext TEXT
                 )"""
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS transfers (
+                    id TEXT PRIMARY KEY,
+                    source TEXT NOT NULL,
+                    source_file TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    destination_file TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    failed_at TEXT,
+                    bytes_copied INTEGER NOT NULL DEFAULT 0,
+                    failure_phase TEXT,
+                    error TEXT
+                )"""
+            )
             marker = connection.execute(
                 "SELECT value FROM metadata WHERE key = 'key_check'"
             ).fetchone()
@@ -70,6 +93,13 @@ class ConnectionStore:
                     ) from exc
                 if value != _KEY_CHECK:
                     raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database")
+            connection.execute(
+                """UPDATE transfers
+                SET status = 'failed', failed_at = ?, failure_phase = 'interruption',
+                    error = 'Service stopped before transfer completed'
+                WHERE status = 'running'""",
+                (_now(),),
+            )
 
     def create(self, item: LocalConnection | SFTPConnection) -> ConnectionView:
         if isinstance(item, LocalConnection):
@@ -132,3 +162,51 @@ class ConnectionStore:
         if kind == "local":
             return LocalConnectionView(name=name, type="local", **settings)
         return SFTPConnectionView(name=name, type="sftp", **settings)
+
+    def start_transfer(self, transfer_id: str, request: TransferRequest) -> TransferRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO transfers (
+                    id, source, source_file, destination, destination_file,
+                    status, started_at, bytes_copied
+                ) VALUES (?, ?, ?, ?, ?, 'running', ?, 0)""",
+                (
+                    transfer_id,
+                    request.source,
+                    request.source_file,
+                    request.destination,
+                    request.destination_file,
+                    _now(),
+                ),
+            )
+        return self.get_transfer(transfer_id)
+
+    def finish_transfer(self, transfer_id: str, bytes_copied: int) -> TransferRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE transfers SET status = 'completed', completed_at = ?, bytes_copied = ?
+                WHERE id = ? AND status = 'running'""",
+                (_now(), bytes_copied, transfer_id),
+            )
+        return self.get_transfer(transfer_id)
+
+    def fail_transfer(
+        self, transfer_id: str, bytes_copied: int, phase: str, message: str
+    ) -> TransferRecord:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE transfers SET status = 'failed', failed_at = ?, bytes_copied = ?,
+                    failure_phase = ?, error = ?
+                WHERE id = ? AND status = 'running'""",
+                (_now(), bytes_copied, phase, message, transfer_id),
+            )
+        return self.get_transfer(transfer_id)
+
+    def get_transfer(self, transfer_id: str) -> TransferRecord:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM transfers WHERE id = ?", (transfer_id,)
+            ).fetchone()
+        if row is None:
+            raise DataBridgeError("TRANSFER_NOT_FOUND", "Transfer not found")
+        return TransferRecord.model_validate(dict(row))

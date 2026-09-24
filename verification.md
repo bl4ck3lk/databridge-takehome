@@ -8,9 +8,9 @@ Status is **planned**, **partial**, or **verified**. Update this table with the 
 | R2 | Local listing and caps: `test_local_connection_persists_and_lists_files`, `test_local_listing_reports_result_and_scan_caps`; SFTP listing: `test_sftp_roundtrip_collision_and_explicit_overwrite`; SFTP caps pending | Partial |
 | R3 | Local CSV and JSON previews against supplied fixtures | Planned |
 | R4 | `test_sftp_roundtrip_collision_and_explicit_overwrite` creates a stored connection and lists/reads/writes through the connector against Docker | Verified |
-| R5 | Byte-identical transfers both ways; a third test connector; collision and same-file cases | Planned |
-| R6 | Completed and failed records, failure after one chunk, destination preservation, startup recovery | Planned |
-| R7 | Local invalid/duplicate/missing: `test_connection_errors_are_structured`; SFTP auth, unavailable server, root, and trust: `test_sftp_failures_have_distinct_safe_codes`; transfer errors pending | Partial |
+| R5 | `test_api_transfers_binary_both_directions_and_preserves_collision` copies a binary file over a chunk in both directions and checks bytes; `test_third_connector_fails_after_chunk_without_publishing` uses a third connector; same-file and overwrite tests in `test_transfers.py` | Verified |
+| R6 | `test_local_transfer_bytes_status_collision_and_overwrite`, `test_third_connector_fails_after_chunk_without_publishing`, `test_startup_marks_interrupted_transfer_failed`, and `test_api_failed_sftp_transfer_has_retrievable_record` check persisted outcomes and destination preservation; interrupted staging listing still pending | Partial |
+| R7 | `test_connection_errors_are_structured`, `test_sftp_failures_have_distinct_safe_codes`, `test_transfer_rejects_same_file_and_reports_missing_source`, and `test_api_failed_sftp_transfer_has_retrievable_record` check stable errors and transfer IDs | Verified |
 | R8 | Deterministic CSV/JSON inference cases through local and SFTP connectors | Planned |
 | R9 | Healthcheck success, authentication failure, unavailable server, and root access failure | Planned |
 | R10 | Reproducible 16 MiB and 256 MiB transfers, SHA-256, time, throughput, peak RSS, platform | Planned |
@@ -21,4 +21,4 @@ Status is **planned**, **partial**, or **verified**. Update this table with the 
 
 Passing local tests does not establish the Docker or live HTTP path. A benchmark is measured evidence on its stated machine, not a universal throughput guarantee. The final README will point to the exact commands and results.
 
-2026-09-24 gates: `make check` with a writable temporary uv cache passed Ruff and 9 local/API tests; `make integration` passed 3 real Docker SFTP tests. The scaffold's live Uvicorn process returned HTTP 200 at `/openapi.json`; no connection or transfer route has yet been exercised over live HTTP.
+2026-09-24 gates: `make check` with a writable temporary uv cache passed Ruff and 14 local/API tests; `make integration` passed 5 real Docker SFTP tests. The scaffold's live Uvicorn process returned HTTP 200 at `/openapi.json`; transfer routes have been exercised through FastAPI TestClient but not yet over live HTTP.
