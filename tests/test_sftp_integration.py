@@ -229,3 +229,18 @@ def test_api_failed_sftp_transfer_has_retrievable_record(
         record = client.get(f"/transfers/{transfer_id}").json()
         assert record["status"] == "failed"
         assert record["failed_at"] and record["bytes_copied"] == 0
+
+
+def test_sftp_preview_uses_shared_parser(trusted_settings: Settings) -> None:
+    filename = f"preview-{uuid4().hex}.json"
+    host_file = PROJECT_ROOT / "sftp_data" / filename
+    host_file.write_bytes((PROJECT_ROOT / "instructions" / "products.json").read_bytes())
+    try:
+        with TestClient(create_app(trusted_settings)) as client:
+            assert client.post("/connections", json=_request("remote")).status_code == 201
+            response = client.get(f"/connections/remote/files/{filename}/head?limit=2")
+        assert response.status_code == 200
+        assert len(response.json()["rows"]) == 2
+        assert response.json()["schema"]["price"] == "float"
+    finally:
+        host_file.unlink(missing_ok=True)

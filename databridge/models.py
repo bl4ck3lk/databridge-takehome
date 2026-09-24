@@ -1,6 +1,6 @@
 """The small public connection contract."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, StringConstraints
 
@@ -48,6 +48,15 @@ class FileList(BaseModel):
     connection: str
     files: list[str]
     truncated: bool
+
+
+class PreviewResult(BaseModel):
+    filename: str
+    format: Literal["csv", "json"]
+    rows: list[dict[str, Any]]
+    schema_: dict[str, Literal["string", "integer", "float", "boolean", "date"]] = Field(
+        alias="schema"
+    )
 
 
 class TransferRequest(BaseModel):

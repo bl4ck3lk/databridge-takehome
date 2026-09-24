@@ -3,7 +3,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -15,9 +15,11 @@ from databridge.models import (
     ConnectionView,
     FileList,
     LocalConnection,
+    PreviewResult,
     TransferRecord,
     TransferRequest,
 )
+from databridge.preview import preview
 from databridge.store import ConnectionStore
 from databridge.transfer import TransferService
 
@@ -31,6 +33,10 @@ _HTTP_STATUS = {
     "CONNECTION_ROOT_UNAVAILABLE": 503,
     "LOCAL_IO_ERROR": 500,
     "SAME_FILE": 400,
+    "UNSUPPORTED_PREVIEW_FORMAT": 400,
+    "MALFORMED_FILE": 400,
+    "PREVIEW_LIMIT_EXCEEDED": 400,
+    "INVALID_REQUEST": 422,
     "TRANSFER_NOT_FOUND": 404,
     "SOURCE_READ_FAILED": 500,
     "DESTINATION_WRITE_FAILED": 500,
@@ -111,6 +117,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connector = connector_for(item, request.app.state.settings.known_hosts_path)
         listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
+
+    @application.get("/connections/{name}/files/{filename}/head", response_model=PreviewResult)
+    def preview_file(
+        name: str, filename: str, request: Request, limit: int = Query(default=5, ge=1, le=100)
+    ) -> PreviewResult:
+        item = request.app.state.store.get(name)
+        connector = connector_for(item, request.app.state.settings.known_hosts_path)
+        return preview(connector, filename, limit)
 
     @application.post(
         "/transfers", response_model=TransferRecord, status_code=status.HTTP_201_CREATED
