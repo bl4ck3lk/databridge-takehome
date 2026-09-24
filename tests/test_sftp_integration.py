@@ -48,6 +48,10 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
             created = client.post("/connections", json=_request("remote_server"))
             assert created.status_code == 201
             assert client.get("/connections/remote_server/files").status_code == 200
+            assert client.post("/connections/remote_server/healthcheck").json() == {
+                "connection": "remote_server",
+                "reachable": True,
+            }
 
             connection = client.app.state.store.get("remote_server")
             connector = SFTPConnector(connection, trusted_settings.known_hosts_path)
@@ -116,11 +120,23 @@ def test_sftp_failures_have_distinct_safe_codes(trusted_settings: Settings) -> N
         assert client.get("/connections/bad_password/files").json()["error"]["code"] == (
             "SFTP_AUTH_FAILED"
         )
+        assert (
+            client.post("/connections/bad_password/healthcheck").json()["error"]["code"]
+            == "SFTP_AUTH_FAILED"
+        )
         assert client.get("/connections/bad_root/files").json()["error"]["code"] == (
             "CONNECTION_ROOT_UNAVAILABLE"
         )
+        assert (
+            client.post("/connections/bad_root/healthcheck").json()["error"]["code"]
+            == "CONNECTION_ROOT_UNAVAILABLE"
+        )
         assert client.get("/connections/server_down/files").json()["error"]["code"] == (
             "SFTP_UNAVAILABLE"
+        )
+        assert (
+            client.post("/connections/server_down/healthcheck").json()["error"]["code"]
+            == "SFTP_UNAVAILABLE"
         )
 
     untrusted = Settings(

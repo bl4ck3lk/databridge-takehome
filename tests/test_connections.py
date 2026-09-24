@@ -22,6 +22,7 @@ def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path:
             "/connections", json={"name": "local_data", "type": "local", "path": str(root)}
         )
         listed = client.get("/connections/local_data/files")
+        health = client.post("/connections/local_data/healthcheck")
 
     assert created.status_code == 201
     assert created.json() == {"name": "local_data", "type": "local", "path": str(root)}
@@ -30,6 +31,7 @@ def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path:
         "files": ["customers.csv"],
         "truncated": False,
     }
+    assert health.json() == {"connection": "local_data", "reachable": True}
     with TestClient(create_app(settings)) as client:
         assert client.get("/connections/local_data").json() == created.json()
 

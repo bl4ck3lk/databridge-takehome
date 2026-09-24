@@ -12,7 +12,7 @@ Status is **planned**, **partial**, or **verified**. Update this table with the 
 | R6 | `test_local_transfer_bytes_status_collision_and_overwrite`, `test_third_connector_fails_after_chunk_without_publishing`, `test_startup_marks_interrupted_transfer_failed`, and `test_api_failed_sftp_transfer_has_retrievable_record` check persisted outcomes and destination preservation; interrupted staging listing still pending | Partial |
 | R7 | `test_connection_errors_are_structured`, `test_sftp_failures_have_distinct_safe_codes`, `test_transfer_rejects_same_file_and_reports_missing_source`, and `test_api_failed_sftp_transfer_has_retrievable_record` check stable errors and transfer IDs | Verified |
 | R8 | `test_supplied_csv_and_json_preview`, `test_preview_inference_empty_mixed_and_malformed`, and `test_sftp_preview_uses_shared_parser` check types, empty/mixed values, malformed input, and SFTP parity | Verified |
-| R9 | Healthcheck success, authentication failure, unavailable server, and root access failure | Planned |
+| R9 | Local and SFTP healthcheck success; bad password, unavailable server, and missing root tested in `test_sftp_integration.py`. Explicit permission-denied fixture pending. | Partial |
 | R10 | Reproducible 16 MiB and 256 MiB transfers, SHA-256, time, throughput, peak RSS, platform | Planned |
 | R11 | Local staging, collision, cleanup, and path escapes in `test_connections.py`; Docker SFTP read/write/overwrite/publish collision in `test_sftp_integration.py`; shared parameterized scenarios pending | Partial |
 | R12 | `/openapi.json` served in `test_openapi_is_served` and a real Uvicorn request; main route contract pending | Partial |

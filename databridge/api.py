@@ -14,6 +14,7 @@ from databridge.models import (
     ConnectionInput,
     ConnectionView,
     FileList,
+    HealthcheckResult,
     LocalConnection,
     PreviewResult,
     TransferRecord,
@@ -117,6 +118,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         connector = connector_for(item, request.app.state.settings.known_hosts_path)
         listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
+
+    @application.post("/connections/{name}/healthcheck", response_model=HealthcheckResult)
+    def healthcheck(name: str, request: Request) -> HealthcheckResult:
+        item = request.app.state.store.get(name)
+        connector = connector_for(item, request.app.state.settings.known_hosts_path)
+        connector.list_files()
+        return HealthcheckResult(connection=name, reachable=True)
 
     @application.get("/connections/{name}/files/{filename}/head", response_model=PreviewResult)
     def preview_file(

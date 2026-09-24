@@ -20,6 +20,6 @@ chmod 600 known_hosts
 make integration
 ```
 
-Capturing the key presented at `127.0.0.1:2222` is an explicit trust-on-first-use step for this local fixture. The application rejects any other key. `make integration` checks real SFTP read, write, overwrite, collision, transfers, preview, and error cases. Start the API with `make run`; it serves `/openapi.json` and `/docs`. Connection creation, inspection, local/SFTP listing, bounded CSV/JSON preview, and synchronous transfers are implemented.
+Capturing the key presented at `127.0.0.1:2222` is an explicit trust-on-first-use step for this local fixture. The application rejects any other key. `make integration` checks real SFTP read, write, overwrite, collision, transfers, preview, healthcheck, and error cases. Start the API with `make run`; it serves `/openapi.json` and `/docs`. Connection creation, inspection, local/SFTP listing, bounded CSV/JSON preview, healthcheck, and synchronous transfers are implemented.
 
 The root Compose file preserves generated SSH host keys in a named volume across normal container recreation. `docker compose down -v` deletes that volume and requires a new local known-hosts bootstrap. This image is amd64 and runs under emulation on ARM hosts; benchmark results must identify the platform.

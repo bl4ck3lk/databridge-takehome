@@ -50,6 +50,11 @@ class FileList(BaseModel):
     truncated: bool
 
 
+class HealthcheckResult(BaseModel):
+    connection: str
+    reachable: Literal[True]
+
+
 class PreviewResult(BaseModel):
     filename: str
     format: Literal["csv", "json"]
