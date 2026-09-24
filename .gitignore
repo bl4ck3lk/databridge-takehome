@@ -1,0 +1,17 @@
+.venv/
+.uv-cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.egg-info/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite3
+state/
+sftp_data/
+known_hosts
+*.known_hosts
+benchmark_data/

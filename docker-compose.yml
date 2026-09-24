@@ -1,0 +1,13 @@
+services:
+  sftp:
+    image: atmoz/sftp:alpine-3.7
+    platform: linux/amd64
+    ports:
+      - "127.0.0.1:2222:22"
+    command: testuser:testpass:1001
+    volumes:
+      - ./sftp_data:/home/testuser/data
+      - sftp_host_keys:/etc/ssh
+
+volumes:
+  sftp_host_keys:
