@@ -23,9 +23,14 @@ downloads dependencies and the SFTP image. Stop the API with Ctrl-C. Later,
 
 Retain `.env` across restarts. The key is required at startup and is never
 stored in SQLite. `make run` serves `http://127.0.0.1:8080` with one worker.
+In another terminal, `make logs` follows the request log at
+`state/databridge.requests.jsonl`. Each JSON line includes a request ID,
+status, route, duration, and allowlisted request parameters. The SFTP password
+field, encryption key, and raw request body are not logged. The response's
+`X-Request-ID` header identifies its log entry; the log file is ignored by Git.
 The database defaults to `state/databridge.sqlite3`. `make smoke` starts its
-own temporary API process
-on a random localhost port; it does not need `make run` to be active. It verifies
+own temporary API process on a random localhost port; it does not need
+`make run` to be active. It verifies
 local and remote preview, transfers both ways, saved status, and matching hashes
 against Docker SFTP.
 
@@ -46,17 +51,13 @@ supplied `data/customers.csv` and `data/products.json` fixtures. Run them from
 the repository root after `make run` is listening:
 
 ```bash
-mkdir -p output
-DATA_ROOT="$(pwd)/data"
-OUTPUT_ROOT="$(pwd)/output"
+curl -sS -X POST http://127.0.0.1:8080/connections \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"local_data","type":"local","path":"data"}'
 
 curl -sS -X POST http://127.0.0.1:8080/connections \
   -H 'Content-Type: application/json' \
-  -d "{\"name\":\"local_data\",\"type\":\"local\",\"path\":\"$DATA_ROOT\"}"
-
-curl -sS -X POST http://127.0.0.1:8080/connections \
-  -H 'Content-Type: application/json' \
-  -d "{\"name\":\"local_output\",\"type\":\"local\",\"path\":\"$OUTPUT_ROOT\"}"
+  -d '{"name":"local_output","type":"local","path":"output"}'
 
 curl -sS -X POST http://127.0.0.1:8080/connections \
   -H 'Content-Type: application/json' \
@@ -82,8 +83,12 @@ shasum -a 256 data/customers.csv sftp_data/customers.csv output/downloaded.csv
 
 Connections persist across service restarts. SFTP connection creation checks
 the request shape; healthcheck or file operations verify live credentials and
-root access. Responses never include the stored password. An existing
-destination is refused unless `"overwrite":true` is passed. The transfer
+root access. Responses never include the stored password. An existing local
+connection directory is reused; a missing one is created when the
+connection is created. Relative local paths such as `data` and `output` are
+resolved from the running service's working directory (the repository root for
+`make run` and `make quickstart`). An existing destination is refused unless
+`"overwrite":true` is passed. The transfer
 response includes status, UTC timestamps, bytes copied, and an ID usable at
 `GET /transfers/{id}`. Failures use a stable error code and include that ID if
 a transfer record was created.

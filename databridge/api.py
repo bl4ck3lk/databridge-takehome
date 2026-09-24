@@ -1,7 +1,13 @@
 """HTTP application entry point and error boundary."""
 
+import json
+import logging
+import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
+from uuid import uuid4
 
 from fastapi import FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -58,6 +64,35 @@ def _error_response(
     )
 
 
+def _log_fields(values: dict[str, object], allowed: tuple[str, ...]) -> dict[str, object]:
+    """Keep only known, scalar request fields; never copy a raw request body to logs."""
+    result: dict[str, object] = {}
+    for key in allowed:
+        value = values.get(key)
+        if isinstance(value, str):
+            result[key] = value[:512]
+        elif isinstance(value, (int, bool)):
+            result[key] = value
+    return result
+
+
+def _body_log_fields(body: object, route: str) -> dict[str, object]:
+    if not isinstance(body, dict):
+        return {}
+    if route == "/connections":
+        common = ("name", "type")
+        if body.get("type") == "local":
+            return _log_fields(body, (*common, "path"))
+        if body.get("type") == "sftp":
+            return _log_fields(body, (*common, "host", "port", "username", "root"))
+        return _log_fields(body, common)
+    if route == "/transfers":
+        return _log_fields(
+            body, ("source", "source_file", "destination", "destination_file", "overwrite")
+        )
+    return {}
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build an app instance so tests can control its lifecycle and settings."""
 
@@ -68,16 +103,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store.initialize()
         application.state.store = store
         application.state.settings = effective
-        yield
+        log_path = effective.database_path.with_suffix(".requests.jsonl")
+        descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as request_log:
+            os.chmod(log_path, 0o600)
+            application.state.request_log = request_log
+            yield
 
     application = FastAPI(title="DataBridge", version="0.1.0", lifespan=lifespan)
 
+    @application.middleware("http")
+    async def log_request(request: Request, call_next):
+        started = perf_counter()
+        request_id = str(uuid4())
+        request.state.request_id = request_id
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        except Exception as exc:
+            request.state.error_type = type(exc).__name__
+            raise
+        finally:
+            route = request.scope.get("route")
+            event = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "request_id": request_id,
+                "method": request.method,
+                "route": route.path if route else None,
+                "status_code": status_code,
+                "duration_ms": round((perf_counter() - started) * 1000, 2),
+            }
+            if request.path_params:
+                event["path_params"] = _log_fields(
+                    request.path_params, ("name", "filename", "transfer_id")
+                )
+            if "limit" in request.query_params:
+                event["query_params"] = _log_fields(dict(request.query_params), ("limit",))
+            if params := getattr(request.state, "body_params", None):
+                event["body_params"] = params
+            for key in ("error_code", "error_type", "transfer_id"):
+                if value := getattr(request.state, key, None):
+                    event[key] = value
+            try:
+                request.app.state.request_log.write(json.dumps(event, separators=(",", ":")) + "\n")
+                request.app.state.request_log.flush()
+            except OSError:
+                logging.getLogger("uvicorn.error").error("request_log_write_failed")
+
     @application.exception_handler(DataBridgeError)
-    def domain_error(_request: Request, exc: DataBridgeError) -> JSONResponse:
+    def domain_error(request: Request, exc: DataBridgeError) -> JSONResponse:
+        request.state.error_code = exc.code
+        request.state.transfer_id = exc.transfer_id
         return _error_response(_HTTP_STATUS[exc.code], exc.code, exc.message, exc.transfer_id)
 
     @application.exception_handler(RequestValidationError)
-    def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        request.state.error_code = "INVALID_REQUEST"
+        route = request.scope.get("route")
+        request.state.body_params = _body_log_fields(exc.body, route.path if route else "")
         first = exc.errors()[0]
         field = next(
             (part for part in reversed(first["loc"]) if isinstance(part, str) and part != "body"),
@@ -90,12 +176,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/connections", response_model=ConnectionView, status_code=status.HTTP_201_CREATED
     )
     def create_connection(item: ConnectionInput, request: Request) -> ConnectionView:
+        request.state.body_params = _body_log_fields(
+            item.model_dump(exclude={"password"}), "/connections"
+        )
         if isinstance(item, LocalConnection):
             try:
-                path = Path(item.path).expanduser().resolve(strict=True)
-            except OSError as exc:
+                requested_path = Path(item.path).expanduser()
+                requested_path.mkdir(parents=True, exist_ok=True)
+                path = requested_path.resolve(strict=True)
+            except FileExistsError as exc:
                 raise DataBridgeError(
-                    "INVALID_CONNECTION_SETTINGS", "Local directory does not exist"
+                    "INVALID_CONNECTION_SETTINGS", "Local path is not a directory"
+                ) from exc
+            except (OSError, RuntimeError) as exc:
+                raise DataBridgeError(
+                    "INVALID_CONNECTION_SETTINGS", "Cannot create local directory"
                 ) from exc
             if not path.is_dir():
                 raise DataBridgeError(
@@ -138,13 +233,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "/transfers", response_model=TransferRecord, status_code=status.HTTP_201_CREATED
     )
     def transfer_file(item: TransferRequest, request: Request) -> TransferRecord:
+        request.state.body_params = _body_log_fields(item.model_dump(), "/transfers")
         service = TransferService(
             request.app.state.store,
             lambda connection: connector_for(
                 connection, request.app.state.settings.known_hosts_path
             ),
         )
-        return service.run(item)
+        record = service.run(item)
+        request.state.transfer_id = record.id
+        return record
 
     @application.get("/transfers/{transfer_id}", response_model=TransferRecord)
     def get_transfer(transfer_id: str, request: Request) -> TransferRecord:

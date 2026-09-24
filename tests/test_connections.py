@@ -93,11 +93,13 @@ def test_missing_key_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_connection_errors_are_structured(settings: Settings, tmp_path: Path) -> None:
+    not_a_directory = tmp_path / "file.txt"
+    not_a_directory.write_text("content")
     with TestClient(create_app(settings)) as client:
         missing = client.get("/connections/no_such_connection")
         invalid_path = client.post(
             "/connections",
-            json={"name": "missing", "type": "local", "path": str(tmp_path / "absent")},
+            json={"name": "invalid", "type": "local", "path": str(not_a_directory)},
         )
         invalid_shape = client.post(
             "/connections", json={"name": "not valid", "type": "local", "path": str(tmp_path)}
@@ -119,6 +121,18 @@ def test_connection_errors_are_structured(settings: Settings, tmp_path: Path) ->
     assert valid.status_code == 201
     assert duplicate.status_code == 409
     assert duplicate.json()["error"]["code"] == "CONNECTION_EXISTS"
+
+
+def test_local_connection_creates_missing_directory(settings: Settings, tmp_path: Path) -> None:
+    root = tmp_path / "new" / "nested"
+    with TestClient(create_app(settings)) as client:
+        created = client.post(
+            "/connections", json={"name": "output", "type": "local", "path": str(root)}
+        )
+
+    assert created.status_code == 201
+    assert root.is_dir()
+    assert created.json()["path"] == str(root)
 
 
 def test_local_write_is_staged_and_preserves_destination_on_failure(tmp_path: Path) -> None:

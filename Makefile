@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := check
 
-.PHONY: quickstart check integration benchmark smoke run
+.PHONY: quickstart check integration benchmark smoke run logs
 
 quickstart:
 	@sh scripts/quickstart.sh
@@ -20,4 +20,7 @@ smoke:
 	@uv run --extra dev python scripts/smoke.py
 
 run:
-	uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1
+	uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1 --no-access-log
+
+logs:
+	@tail -n 50 -F state/databridge.requests.jsonl
