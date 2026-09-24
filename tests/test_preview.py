@@ -52,6 +52,9 @@ def test_preview_inference_empty_mixed_and_malformed(settings: Settings, tmp_pat
     (tmp_path / "mixed.json").write_text(
         '[{"count":1,"flag":true,"nullable":null},{"count":2.5,"flag":false,"nullable":"x"}]'
     )
+    (tmp_path / "json-strings.json").write_text(
+        '[{"numeric":"42","boolean":"true","date":"2024-01-01"}]'
+    )
     (tmp_path / "bad.json").write_text('[{"x":1},]')
     (tmp_path / "bad.csv").write_text("a,a\n1,2\n")
     (tmp_path / "bad-number.json").write_text('[{"x":NaN}]')
@@ -60,6 +63,7 @@ def test_preview_inference_empty_mixed_and_malformed(settings: Settings, tmp_pat
         client.post("/connections", json={"name": "files", "type": "local", "path": str(tmp_path)})
         csv_preview = client.get("/connections/files/files/mixed.csv/head?limit=10")
         json_preview = client.get("/connections/files/files/mixed.json/head?limit=10")
+        json_strings = client.get("/connections/files/files/json-strings.json/head")
         bad_json = client.get("/connections/files/files/bad.json/head?limit=10")
         bad_json_short = client.get("/connections/files/files/bad.json/head?limit=1")
         bad_csv = client.get("/connections/files/files/bad.csv/head")
@@ -79,6 +83,11 @@ def test_preview_inference_empty_mixed_and_malformed(settings: Settings, tmp_pat
         "count": "float",
         "flag": "boolean",
         "nullable": "string",
+    }
+    assert json_strings.json()["schema"] == {
+        "numeric": "string",
+        "boolean": "string",
+        "date": "date",
     }
     assert bad_json.json()["error"]["code"] == "MALFORMED_FILE"
     assert bad_json_short.json()["error"]["code"] == "MALFORMED_FILE"

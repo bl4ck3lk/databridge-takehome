@@ -130,7 +130,7 @@ def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
         after_comma = True
 
 
-def _type_of(value: Any) -> InferredType | None:
+def _type_of(value: Any, *, csv_value: bool) -> InferredType | None:
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -143,16 +143,17 @@ def _type_of(value: Any) -> InferredType | None:
         clean = value.strip()
         if not clean:
             return None
-        if clean.lower() in {"true", "false"}:
-            return "boolean"
-        if _INTEGER.fullmatch(clean):
-            return "integer"
-        try:
-            number = float(clean)
-            if math.isfinite(number):
-                return "float"
-        except ValueError:
-            pass
+        if csv_value:
+            if clean.lower() in {"true", "false"}:
+                return "boolean"
+            if _INTEGER.fullmatch(clean):
+                return "integer"
+            try:
+                number = float(clean)
+                if math.isfinite(number):
+                    return "float"
+            except ValueError:
+                pass
         try:
             date.fromisoformat(clean)
             return "date"
@@ -161,12 +162,14 @@ def _type_of(value: Any) -> InferredType | None:
     return "string"
 
 
-def _schema(rows: list[dict[str, Any]], header: list[str] | None = None) -> dict[str, InferredType]:
+def _schema(
+    rows: list[dict[str, Any]], header: list[str] | None = None, *, csv_values: bool = False
+) -> dict[str, InferredType]:
     result: dict[str, InferredType] = {field: "string" for field in header or []}
     observed: dict[str, InferredType] = {}
     for row in rows:
         for field, value in row.items():
-            kind = _type_of(value)
+            kind = _type_of(value, csv_value=csv_values)
             if kind is None:
                 result.setdefault(field, "string")
                 continue
@@ -192,4 +195,6 @@ def preview(connector: Connector, filename: str, limit: int) -> PreviewResult:
         return PreviewResult(filename=filename, format="json", rows=rows, schema=_schema(rows))
     rows = _csv_rows(text, limit, at_limit)
     header = next(csv.reader(io.StringIO(text)), [])
-    return PreviewResult(filename=filename, format="csv", rows=rows, schema=_schema(rows, header))
+    return PreviewResult(
+        filename=filename, format="csv", rows=rows, schema=_schema(rows, header, csv_values=True)
+    )
