@@ -81,6 +81,8 @@ Restrict API file names to one file at the configured root. Reject separators, `
 
 ## Verification and submission evidence
 
+The live [requirement evidence map](verification.md) tracks R1–R14 as implementation and tests land. A planned row is not evidence of a passing requirement.
+
 - Unit tests: deterministic schema inference, filename validation, transfer state transitions and failure cleanup, and shared connector behavior. Use a compact scenario table for both connectors rather than a separate test framework; keep connector-specific assertions where needed. Test empty files, exact/chunk-adjacent sizes, existing destinations, same-file copies, path and symlink escapes, truncated listings, and failure after a chunk has been written. Avoid tests that merely repeat the implementation.
 - API tests: persistence across app restart, response redaction, status/errors, and OpenAPI availability.
 - Credential tests: inspect the stored row to confirm the password is absent in plaintext; restart with the same key and use the connection; reject an absent or wrong key at startup without disclosing secret material.
