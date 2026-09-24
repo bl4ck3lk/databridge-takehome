@@ -9,4 +9,16 @@ def test_openapi_is_served(settings: Settings) -> None:
         response = client.get("/openapi.json")
 
     assert response.status_code == 200
-    assert response.json()["info"]["title"] == "DataBridge"
+    document = response.json()
+    assert document["info"]["title"] == "DataBridge"
+    assert {
+        "/connections",
+        "/connections/{name}",
+        "/connections/{name}/files",
+        "/connections/{name}/files/{filename}/head",
+        "/connections/{name}/healthcheck",
+        "/transfers",
+        "/transfers/{transfer_id}",
+    } <= set(document["paths"])
+    assert "password" not in document["components"]["schemas"]["SFTPConnectionView"]["properties"]
+    assert "password" in document["components"]["schemas"]["SFTPConnection"]["properties"]

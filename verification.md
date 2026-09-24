@@ -1,6 +1,6 @@
 # Requirement evidence map
 
-Status is **planned**, **partial**, or **verified**. Update this table with the exact test or artifact as each slice lands. `make check` runs static checks and local/API tests; `make integration` will use Docker SFTP; the live smoke command and benchmark will run separately. The latter commands do not exist yet.
+Status is **planned**, **partial**, or **verified**. Each row points to a test or artifact. `make check` runs static checks and local/API tests; `make integration` uses Docker SFTP; `make smoke` uses live HTTP and Docker; `make benchmark` measures large transfers.
 
 | ID | Acceptance evidence | Status |
 | --- | --- | --- |
@@ -15,10 +15,10 @@ Status is **planned**, **partial**, or **verified**. Update this table with the 
 | R9 | Local and SFTP success, bad password, unavailable server, missing root, and unreadable root checked in `test_connections.py` and `test_sftp_integration.py` | Verified |
 | R10 | `make benchmark`, [raw results](docs/benchmark-results.json), and [measurement notes](docs/benchmark.md): 16/256 MiB both ways, matching SHA-256, end-to-end duration, throughput, peak RSS, platform/emulation, and an explicitly untested 1 GiB estimate | Verified |
 | R11 | `test_connector_contract_at_chunk_boundaries` runs identical empty/boundary-size read/write, collision, overwrite, cleanup, and escape cases against local and SFTP; other tests cover local symlink escape and publish-time SFTP collision | Verified |
-| R12 | `/openapi.json` served in `test_openapi_is_served` and a real Uvicorn request; main route contract pending | Partial |
-| R13 | Ciphertext/redaction and wrong/missing key: `test_connections.py`; SFTP use after store restart: `test_sftp_roundtrip_collision_and_explicit_overwrite`; final log review pending | Partial |
-| R14 | One fresh-checkout smoke command against live HTTP and Docker SFTP with hash comparison | Planned |
+| R12 | `test_openapi_is_served` checks all main routes and redacted output schema; `make smoke` fetches live OpenAPI; README links Swagger UI and gives copyable curl examples | Verified |
+| R13 | Ciphertext/redaction and wrong/missing key in `test_connections.py`; SFTP use after store restart in `test_sftp_roundtrip_collision_and_explicit_overwrite`; tracked-file and logging audit found no committed key, known-hosts file, SQLite database, or secret-bearing log statement | Verified |
+| R14 | `make smoke` started Uvicorn, exercised local/SFTP connections, healthcheck, local and remote previews, both transfer directions, persisted status, and SHA-256 equality (1005-byte supplied CSV) | Verified |
 
-Passing local tests does not establish the Docker or live HTTP path. A benchmark is measured evidence on its stated machine, not a universal throughput guarantee. The final README will point to the exact commands and results.
+Passing local tests alone does not establish the Docker or live HTTP path. The integration suite and smoke command cover those separately. Benchmark measurements apply to the stated machine and fixture.
 
-2026-09-24 gates: `make check` with a writable temporary uv cache passed Ruff and 21 local/API tests; `make integration` passed 12 real Docker SFTP tests, then the new unreadable-root case passed individually. The scaffold's live Uvicorn process returned HTTP 200 at `/openapi.json`; transfer and preview routes have been exercised through FastAPI TestClient but not yet over live HTTP.
+2026-09-24 gates: `make check` with a writable temporary uv cache passed Ruff and 21 local/API tests; `make integration` passed 12 real Docker SFTP tests, then the unreadable-root case passed individually. `make smoke` passed through live Uvicorn and Docker SFTP with matching hashes; `make benchmark` passed 16/256 MiB both ways. `make run` was also checked with the README's `.env` setup and returned HTTP 200 for live `/openapi.json`.

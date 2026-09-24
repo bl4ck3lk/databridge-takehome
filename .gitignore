@@ -15,3 +15,4 @@ sftp_data/
 known_hosts
 *.known_hosts
 benchmark_data/
+output/
