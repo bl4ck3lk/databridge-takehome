@@ -33,8 +33,8 @@ Three concrete prompt-to-output examples:
 I chose implementation details within the engineer's scope: FastAPI, a small
 connector protocol, SQLite with Fernet-encrypted SFTP passwords, staged writes,
 and a connector-neutral transfer service. The engineer requested deliberate
-commits and a public-ready repository; local commits show the sequence. I did
-not create or publish a GitHub repository because the available `gh` account
-has an invalid token. The system is intentionally a localhost, single-process,
+commits and a public-ready repository. I created a separate private GitHub
+repository and pushed the staged history; making it public remains a later
+decision. The system is intentionally a localhost, single-process,
 single-namespace service; it does not claim tenant isolation, universal SFTP
 atomicity, or resumable transfers.
