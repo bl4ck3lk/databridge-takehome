@@ -13,6 +13,7 @@ from databridge.config import Settings
 from databridge.connectors.base import CHUNK_SIZE
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
+from databridge.models import TransferRequest
 
 pytestmark = pytest.mark.integration
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -260,3 +261,34 @@ def test_sftp_preview_uses_shared_parser(trusted_settings: Settings) -> None:
         assert response.json()["schema"]["price"] == "float"
     finally:
         host_file.unlink(missing_ok=True)
+
+
+def test_interrupted_transfer_stage_stays_hidden_after_restart(
+    trusted_settings: Settings,
+) -> None:
+    transfer_id = str(uuid4())
+    destination_name = f"interrupted-{uuid4().hex}.bin"
+    stage_name = f".{destination_name}.databridge-{transfer_id}.part"
+    stage_file = PROJECT_ROOT / "sftp_data" / stage_name
+    try:
+        with TestClient(create_app(trusted_settings)) as client:
+            assert client.post("/connections", json=_request("remote")).status_code == 201
+            client.app.state.store.start_transfer(
+                transfer_id,
+                TransferRequest(
+                    source="remote",
+                    source_file="source.bin",
+                    destination="remote",
+                    destination_file=destination_name,
+                ),
+            )
+        stage_file.write_bytes(b"unpublished")
+        with TestClient(create_app(trusted_settings)) as restarted:
+            record = restarted.get(f"/transfers/{transfer_id}").json()
+            listing = restarted.get("/connections/remote/files").json()
+        assert record["status"] == "failed"
+        assert record["failure_phase"] == "interruption"
+        assert stage_name not in listing["files"]
+        assert not (PROJECT_ROOT / "sftp_data" / destination_name).exists()
+    finally:
+        stage_file.unlink(missing_ok=True)
