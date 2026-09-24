@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from databridge.api import create_app
 from databridge.config import Settings
+from databridge.connectors import sftp as sftp_module
 from databridge.connectors.base import CHUNK_SIZE
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
@@ -292,3 +293,47 @@ def test_interrupted_transfer_stage_stays_hidden_after_restart(
         assert not (PROJECT_ROOT / "sftp_data" / destination_name).exists()
     finally:
         stage_file.unlink(missing_ok=True)
+
+
+def test_sftp_listing_reports_result_and_scan_caps(
+    trusted_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    names = [f"listing-{uuid4().hex}.bin" for _ in range(3)]
+    files = [PROJECT_ROOT / "sftp_data" / name for name in names]
+    try:
+        for file in files:
+            file.write_bytes(b"x")
+        with TestClient(create_app(trusted_settings)) as client:
+            client.post("/connections", json=_request("remote"))
+            monkeypatch.setattr(sftp_module, "MAX_LIST_RESULTS", 2)
+            result_cap = client.get("/connections/remote/files").json()
+            assert result_cap["truncated"] is True
+            assert len(result_cap["files"]) == 2
+            monkeypatch.setattr(sftp_module, "MAX_LIST_SCAN", 1)
+            scan_cap = client.get("/connections/remote/files").json()
+            assert scan_cap["truncated"] is True
+            assert len(scan_cap["files"]) <= 1
+    finally:
+        for file in files:
+            file.unlink(missing_ok=True)
+
+
+def test_sftp_healthcheck_reports_unreadable_root(trusted_settings: Settings) -> None:
+    dirname = f"blocked-{uuid4().hex}"
+    host_dir = PROJECT_ROOT / "sftp_data" / dirname
+    host_dir.mkdir()
+    host_dir.chmod(0)
+    try:
+        with TestClient(create_app(trusted_settings)) as client:
+            assert (
+                client.post(
+                    "/connections", json=_request("blocked", root=f"data/{dirname}")
+                ).status_code
+                == 201
+            )
+            response = client.post("/connections/blocked/healthcheck")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONNECTION_ROOT_UNAVAILABLE"
+    finally:
+        host_dir.chmod(0o755)
+        host_dir.rmdir()
