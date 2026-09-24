@@ -1,0 +1,16 @@
+id,first_name,last_name,email,age,signup_date,is_active,balance
+1,Alice,Chen,alice.chen@example.com,34,2023-06-15,true,1250.00
+2,Bob,Martinez,bob.martinez@example.com,28,2024-01-20,true,340.50
+3,Carol,Johnson,carol.j@example.com,45,2022-11-03,false,0.00
+4,David,Kim,david.kim@example.com,31,2023-09-08,true,890.75
+5,Eve,Okafor,eve.okafor@example.com,27,2024-03-12,true,2100.00
+6,Frank,Mueller,frank.m@example.com,52,2021-04-22,false,45.30
+7,Grace,Patel,grace.patel@example.com,39,2023-01-15,true,567.80
+8,Hank,Williams,hank.w@example.com,41,2022-07-30,true,1890.25
+9,Iris,Tanaka,iris.tanaka@example.com,36,2023-11-11,true,430.00
+10,Jake,O'Brien,jake.ob@example.com,29,2024-02-28,false,0.00
+11,Kara,Singh,kara.singh@example.com,33,2023-05-19,true,780.60
+12,Leo,Costa,leo.costa@example.com,47,2022-01-10,true,3200.00
+13,Mia,Anderson,mia.a@example.com,25,2024-04-01,true,125.00
+14,Noah,Petrov,noah.petrov@example.com,38,2023-03-27,false,60.00
+15,Olivia,Yamamoto,olivia.y@example.com,30,2024-01-05,true,950.40

@@ -1,0 +1,8 @@
+[
+  {"product_id": 101, "name": "Wireless Mouse", "category": "Electronics", "price": 29.99, "in_stock": true},
+  {"product_id": 102, "name": "Mechanical Keyboard", "category": "Electronics", "price": 89.50, "in_stock": true},
+  {"product_id": 103, "name": "USB-C Hub", "category": "Electronics", "price": 45.00, "in_stock": false},
+  {"product_id": 104, "name": "Standing Desk Pad", "category": "Office", "price": 35.75, "in_stock": true},
+  {"product_id": 105, "name": "Monitor Light Bar", "category": "Electronics", "price": 55.00, "in_stock": true},
+  {"product_id": 106, "name": "Ergonomic Chair Cushion", "category": "Office", "price": 42.99, "in_stock": false}
+]

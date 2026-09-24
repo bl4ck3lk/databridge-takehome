@@ -1,0 +1,9 @@
+services:
+  sftp:
+    image: atmoz/sftp:alpine-3.7
+    ports:
+      - "2222:22"
+    command: testuser:testpass:1001
+    volumes:
+      - ./sftp_data:/home/testuser/data
+    restart: unless-stopped
