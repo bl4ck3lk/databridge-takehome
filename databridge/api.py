@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 
 from databridge.config import Settings
 from databridge.connectors.local import LocalConnector
+from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
 from databridge.models import (
     ConnectionInput,
@@ -27,6 +28,10 @@ _HTTP_STATUS = {
     "DESTINATION_EXISTS": 409,
     "CONNECTION_ROOT_UNAVAILABLE": 503,
     "LOCAL_IO_ERROR": 500,
+    "SFTP_AUTH_FAILED": 502,
+    "SFTP_HOST_KEY_REJECTED": 502,
+    "SFTP_OPERATION_FAILED": 502,
+    "SFTP_UNAVAILABLE": 503,
 }
 
 
@@ -94,9 +99,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get("/connections/{name}/files", response_model=FileList)
     def list_files(name: str, request: Request) -> FileList:
         item = request.app.state.store.get(name)
-        if item.type != "local":
-            raise DataBridgeError("CONNECTION_ROOT_UNAVAILABLE", "SFTP file access is not ready")
-        listing = LocalConnector(Path(item.path)).list_files()
+        if item.type == "local":
+            connector = LocalConnector(Path(item.path))
+        else:
+            connector = SFTPConnector(item, request.app.state.settings.known_hosts_path)
+        listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
 
     return application

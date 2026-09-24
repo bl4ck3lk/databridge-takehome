@@ -1,3 +1,5 @@
+name: databridge_takehome
+
 services:
   sftp:
     image: atmoz/sftp:alpine-3.7
