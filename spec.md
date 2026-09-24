@@ -47,9 +47,27 @@ Use JSON requests and responses. Names and paths below are proposed public route
 | Transfer file | `POST /transfers` | Completed record on success; error with transfer ID on failure; `overwrite` defaults to false |
 | Inspect transfer | `GET /transfers/{id}` | Persisted status and metrics |
 
+**Request and response shapes.** `POST /connections` accepts either `{"name":"local_data","type":"local","path":"./data"}` or `{"name":"remote_server","type":"sftp","host":"127.0.0.1","port":2222,"username":"testuser","password":"...","root":"data"}`. Names match `[A-Za-z][A-Za-z0-9_-]{0,63}`. A local path must name an existing directory and is stored as an absolute resolved path so restarting from another working directory does not change its meaning. SFTP creation checks field shape but does not contact the server; healthcheck and file operations test live credentials and access. Connection responses contain the name, type, and nonsecret settings; the `password` key is absent, including from list and get responses.
+
+`POST /transfers` accepts `{"source":"local_data","source_file":"customers.csv","destination":"remote_server","destination_file":"customers.csv","overwrite":false}`. `overwrite` may be omitted and defaults to false. A transfer record contains `id`, source and destination names and filenames, `status`, `started_at`, `completed_at`, `failed_at`, `bytes_copied`, `failure_phase`, and a safe `error` message; fields that do not apply are null. List returns `{"connection":"local_data","files":["customers.csv"],"truncated":false}`. Preview returns `filename`, `format`, `rows`, and a `schema` mapping field name to inferred type. CSV row values remain strings as read; JSON row values retain their JSON types. Inference describes the preview sample and does not transform either file.
+
+**Bounds.** File listing returns at most 1,000 names and scans at most 10,000 entries; `truncated=true` whenever a cap stops enumeration. Sort returned names for stable output. Preview defaults to 5 rows, allows 1–100 rows, and reads at most 1 MiB of source content. Exceeding the byte budget before a valid preview can be produced is an error. Transfer uses 1 MiB byte chunks. These values are implementation constants with boundary tests, not user-configurable API options.
+
 The service does not need asynchronous jobs for this exercise. A transfer request finishes when the copy and destination finalization finish. Status transitions are `running` to `completed` or `failed`. Persist the initial record before I/O and persist the terminal state even when an expected connector error occurs. An error response includes the transfer ID so the failed record can be inspected. Timestamps use UTC ISO 8601. `bytes_copied` counts bytes successfully written to the staged destination; a nonzero value on failure does not mean the final destination was published. Count bytes rather than rows because a data-agnostic copy never parses records. Record a safe failure phase such as source connection, destination connection, copy, or finalization. With the documented one-process runtime, startup marks records left `running` as `failed` with an interruption reason; another service process must not share that database concurrently.
 
-Use `422` for request shape errors, `400` for semantically invalid settings or filenames, `404` for missing connections/files/transfers, `409` for duplicate connection names or a refused destination collision, and a `5xx` gateway/service error for remote authentication or availability failures. Error bodies carry a stable code and a human-readable message. A remote authentication failure must not be reported as failure of the API caller's authentication.
+Errors use `{"error":{"code":"FILE_NOT_FOUND","message":"File not found","transfer_id":null}}`; `transfer_id` is set for a failed transfer request after its record is created. Use these stable codes and statuses:
+
+| HTTP status | Codes |
+| --- | --- |
+| 422 | `INVALID_REQUEST` for malformed request shape or field types |
+| 400 | `INVALID_CONNECTION_SETTINGS`, `INVALID_FILENAME`, `SAME_FILE`, `UNSUPPORTED_PREVIEW_FORMAT`, `MALFORMED_FILE`, `PREVIEW_LIMIT_EXCEEDED` |
+| 404 | `CONNECTION_NOT_FOUND`, `FILE_NOT_FOUND`, `TRANSFER_NOT_FOUND` |
+| 409 | `CONNECTION_EXISTS`, `DESTINATION_EXISTS` |
+| 502 | `SFTP_AUTH_FAILED`, `SFTP_HOST_KEY_REJECTED`, `SFTP_OPERATION_FAILED` |
+| 503 | `SFTP_UNAVAILABLE`, `CONNECTION_ROOT_UNAVAILABLE` |
+| 500 | `LOCAL_IO_ERROR`, `TRANSFER_INTERNAL_ERROR` |
+
+Avoid raw stack traces and secrets in error messages or logs. A remote authentication failure must not be reported as failure of the API caller's authentication. Keep the error mapper in the API boundary and raise typed domain/connector errors below it.
 
 ## Design boundaries
 
