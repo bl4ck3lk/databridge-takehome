@@ -17,7 +17,7 @@ Status is **planned**, **partial**, or **verified**. Each row points to a test o
 | R11 | `test_connector_contract_at_chunk_boundaries` runs identical empty/boundary-size read/write, collision, overwrite, cleanup, and escape cases against local and SFTP; other tests cover local symlink escape and publish-time SFTP collision | Verified |
 | R12 | `test_openapi_is_served` checks all main routes and redacted output schema; `make smoke` fetches live OpenAPI; README links Swagger UI and gives copyable curl examples | Verified |
 | R13 | Ciphertext/redaction and wrong/missing key in `test_connections.py`; SFTP use after store restart in `test_sftp_roundtrip_collision_and_explicit_overwrite`; tracked-file and logging audit found no committed key, known-hosts file, SQLite database, or secret-bearing log statement | Verified |
-| R14 | `make smoke` started Uvicorn, exercised local/SFTP connections, healthcheck, local and remote previews, both transfer directions, persisted status, and SHA-256 equality (1005-byte supplied CSV) | Verified |
+| R14 | `make smoke` started Uvicorn, exercised local/SFTP connections, healthcheck, local and remote previews, both transfer directions, persisted status, and SHA-256 equality (1005-byte supplied CSV). `make quickstart` ran the complete reviewer path twice, including once with a missing trusted host-key file, and served `/openapi.json` with HTTP 200. | Verified |
 
 Passing local tests alone does not establish the Docker or live HTTP path. The integration suite and smoke command cover those separately. Benchmark measurements apply to the stated machine and fixture.
 

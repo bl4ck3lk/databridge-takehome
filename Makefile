@@ -1,4 +1,9 @@
-.PHONY: check integration benchmark smoke run
+.DEFAULT_GOAL := check
+
+.PHONY: quickstart check integration benchmark smoke run
+
+quickstart:
+	@sh scripts/quickstart.sh
 
 check:
 	uv run --extra dev ruff check .

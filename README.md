@@ -8,37 +8,32 @@ contract tests, and served OpenAPI documentation.
 
 ## Quick start
 
-Use Python 3.12, [uv](https://docs.astral.sh/uv/), and Docker Compose. From the
-repository root:
+Install Python 3.12, [uv](https://docs.astral.sh/uv/), and Docker Compose. From
+the repository root, copy this single command:
 
 ```bash
-uv sync --extra dev
-if [ ! -f .env ]; then
-  uv run python -c 'from cryptography.fernet import Fernet; print("DATABRIDGE_ENCRYPTION_KEY=" + Fernet.generate_key().decode())' > .env
-fi
-chmod 600 .env
-mkdir -p sftp_data
-docker compose up -d
-ssh-keyscan -T 5 -p 2222 127.0.0.1 > known_hosts
-chmod 600 known_hosts
-make check
-make integration
-make smoke
-make run
+make quickstart
 ```
 
-Create `.env` **once** and retain it across restarts. The key is required at
-startup and is never stored in SQLite. `make run` serves
-`http://127.0.0.1:8080` with one worker. The database defaults to
-`state/databridge.sqlite3`. `make smoke` starts its own temporary API process
+This installs dependencies, creates `.env` only if it is missing, starts the
+SFTP fixture, captures its local host key only if no trusted key is saved, runs
+the checks, and starts the API. It takes longer on the first run because it
+downloads dependencies and the SFTP image. Stop the API with Ctrl-C. Later,
+`make run` starts only the API.
+
+Retain `.env` across restarts. The key is required at startup and is never
+stored in SQLite. `make run` serves `http://127.0.0.1:8080` with one worker.
+The database defaults to `state/databridge.sqlite3`. `make smoke` starts its
+own temporary API process
 on a random localhost port; it does not need `make run` to be active. It verifies
 local and remote preview, transfers both ways, saved status, and matching hashes
 against Docker SFTP.
 
-The `ssh-keyscan` step explicitly trusts the key presented by this **local test
-container**. Runtime SFTP connections reject untrusted or changed keys. The
-Compose project stores server host keys in a named volume, so normal container
-recreation keeps them stable. `docker compose down -v` removes that volume;
+The first run explicitly trusts the key presented by this **local test
+container**. Later runs retain the saved key; runtime SFTP connections reject
+untrusted or changed keys. The Compose project stores server host keys in a
+named volume, so normal container recreation keeps them stable.
+`docker compose down -v` removes that volume;
 repeat the trust bootstrap if you use it. The image is linux/amd64; on ARM
 Docker engines it runs under emulation. If the SFTP mount is not writable on
 your platform, inspect permissions on `sftp_data/` before running integration.
