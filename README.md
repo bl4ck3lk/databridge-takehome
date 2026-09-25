@@ -50,6 +50,10 @@ The running service provides [Swagger UI](http://127.0.0.1:8080/docs) and
 supplied `data/customers.csv` and `data/products.json` fixtures. Run them from
 the repository root after `make run` is listening:
 
+For `POST /connections` in Swagger UI, select the `local_data`, `local_output`,
+or `sftp` example before sending it. The generic `"string"` placeholder is a
+literal path, not a reference to the sample data.
+
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/connections \
   -H 'Content-Type: application/json' \

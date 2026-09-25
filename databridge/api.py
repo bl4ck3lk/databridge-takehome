@@ -7,9 +7,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Annotated
 from uuid import uuid4
 
-from fastapi import FastAPI, Query, Request, status
+from fastapi import Body, FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -175,7 +176,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.post(
         "/connections", response_model=ConnectionView, status_code=status.HTTP_201_CREATED
     )
-    def create_connection(item: ConnectionInput, request: Request) -> ConnectionView:
+    def create_connection(
+        item: Annotated[
+            ConnectionInput,
+            Body(
+                discriminator="type",
+                description=(
+                    "Local paths are relative to the server's working directory; "
+                    "missing directories are created."
+                ),
+                openapi_examples={
+                    "local_data": {
+                        "summary": "Read supplied files",
+                        "value": {"name": "local_data", "type": "local", "path": "data"},
+                    },
+                    "local_output": {
+                        "summary": "Write local output",
+                        "value": {"name": "local_output", "type": "local", "path": "output"},
+                    },
+                    "sftp": {
+                        "summary": "Supplied SFTP fixture",
+                        "value": {
+                            "name": "remote_server",
+                            "type": "sftp",
+                            "host": "127.0.0.1",
+                            "port": 2222,
+                            "username": "testuser",
+                            "password": "testpass",
+                            "root": "data",
+                        },
+                    },
+                },
+            ),
+        ],
+        request: Request,
+    ) -> ConnectionView:
         request.state.body_params = _body_log_fields(
             item.model_dump(exclude={"password"}), "/connections"
         )

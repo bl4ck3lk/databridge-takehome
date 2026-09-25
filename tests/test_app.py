@@ -26,6 +26,17 @@ def test_openapi_is_served(settings: Settings) -> None:
     } <= set(document["paths"])
     assert "password" not in document["components"]["schemas"]["SFTPConnectionView"]["properties"]
     assert "password" in document["components"]["schemas"]["SFTPConnection"]["properties"]
+    connection_body = document["paths"]["/connections"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]
+    assert connection_body["schema"]["discriminator"]["propertyName"] == "type"
+    assert connection_body["examples"]["local_data"]["value"] == {
+        "name": "local_data",
+        "type": "local",
+        "path": "data",
+    }
+    assert connection_body["examples"]["local_output"]["value"]["path"] == "output"
+    assert connection_body["examples"]["sftp"]["value"]["root"] == "data"
 
 
 def test_request_log_records_error_params_without_secrets(
