@@ -5,15 +5,23 @@ cd "$(dirname "$0")/.."
 
 uv sync --extra dev
 
-if [ ! -f .env ]; then
-  env_temp="$(mktemp .env.XXXXXX)"
-  if ! uv run python -c 'from cryptography.fernet import Fernet; print("DATABRIDGE_ENCRYPTION_KEY=" + Fernet.generate_key().decode())' > "$env_temp" || [ ! -s "$env_temp" ]; then
-    rm -f "$env_temp"
-    exit 1
-  fi
-  mv "$env_temp" .env
-fi
+(umask 077 && touch .env)
 chmod 600 .env
+
+# Append a setting only when .env lacks it, so a rerun never replaces a trusted value.
+ensure_env() {
+  if ! grep -q "^$1=" .env; then
+    printf '%s="%s"\n' "$1" "$2" >> .env
+  fi
+}
+
+if ! grep -q '^DATABRIDGE_ENCRYPTION_KEY=' .env; then
+  key="$(uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+  [ -n "$key" ] || exit 1
+  ensure_env DATABRIDGE_ENCRYPTION_KEY "$key"
+fi
+ensure_env DATABRIDGE_DB_PATH "$PWD/state/databridge.sqlite3"
+ensure_env DATABRIDGE_KNOWN_HOSTS "$PWD/known_hosts"
 
 mkdir -p sftp_data
 docker compose up -d

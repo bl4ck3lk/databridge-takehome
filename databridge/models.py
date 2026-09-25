@@ -1,5 +1,7 @@
 """The small public connection contract."""
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, Field, SecretStr, StringConstraints
@@ -25,11 +27,8 @@ class SFTPConnection(BaseModel):
     root: str = Field(min_length=1)
 
 
-ConnectionInput = Annotated[LocalConnection | SFTPConnection, Field(discriminator="type")]
-CONNECTION_TYPE_NAMES: tuple[str, ...] = tuple(
-    get_args(model.model_fields["type"].annotation)[0]
-    for model in (LocalConnection, SFTPConnection)
-)
+Connection = LocalConnection | SFTPConnection
+ConnectionInput = Annotated[Connection, Field(discriminator="type")]
 
 
 class LocalConnectionView(BaseModel):
@@ -48,6 +47,19 @@ class SFTPConnectionView(BaseModel):
 
 
 ConnectionView = LocalConnectionView | SFTPConnectionView
+
+
+def _type_name(model: type[BaseModel]) -> str:
+    return str(get_args(model.model_fields["type"].annotation)[0])
+
+
+CONNECTION_MODELS: Mapping[str, tuple[type[Connection], type[ConnectionView]]] = MappingProxyType(
+    {
+        _type_name(LocalConnection): (LocalConnection, LocalConnectionView),
+        _type_name(SFTPConnection): (SFTPConnection, SFTPConnectionView),
+    }
+)
+CONNECTION_TYPE_NAMES: tuple[str, ...] = tuple(CONNECTION_MODELS)
 
 
 class FileList(BaseModel):

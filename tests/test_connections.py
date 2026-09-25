@@ -60,7 +60,7 @@ def test_encrypted_sftp_password_is_never_in_read_responses(settings: Settings) 
 
     with sqlite3.connect(settings.database_path) as database:
         row = database.execute(
-            "SELECT settings_json, password_ciphertext FROM connections WHERE name = ?",
+            "SELECT settings_json, secrets_ciphertext FROM connections WHERE name = ?",
             ("remote_server",),
         ).fetchone()
     assert password not in row[0]

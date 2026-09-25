@@ -30,7 +30,7 @@ from databridge.models import (
 )
 from databridge.preview import preview
 from databridge.request_log import RequestLog
-from databridge.store import ConnectionStore
+from databridge.store import ConnectionStore, DatabaseOwnerLock
 from databridge.transfer import TransferService
 from databridge.web import RequestContextMiddleware, body_log_fields, error_response
 
@@ -123,17 +123,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         effective = settings if settings is not None else Settings.from_env()
-        store = ConnectionStore(effective.database_path, effective.encryption_key)
-        store.initialize()
-        request_log = RequestLog(effective.request_log_path)
-        request_log.open()
-        application.state.store = store
-        application.state.settings = effective
-        application.state.request_log = request_log
-        try:
-            yield
-        finally:
-            request_log.close()
+        with DatabaseOwnerLock(effective.lock_path):
+            store = ConnectionStore(effective.database_path, effective.encryption_key)
+            store.initialize()
+            request_log = RequestLog(effective.request_log_path)
+            request_log.open()
+            application.state.store = store
+            application.state.settings = effective
+            application.state.request_log = request_log
+            try:
+                yield
+            finally:
+                request_log.close()
 
     application = FastAPI(
         title="DataBridge",

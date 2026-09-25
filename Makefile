@@ -24,4 +24,4 @@ run:
 	@uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1 --no-access-log
 
 logs:
-	@tail -n 50 -F state/databridge.requests.jsonl
+	@tail -n 50 -F "$$(uv run --env-file .env python -c 'from databridge.config import Settings; print(Settings.from_env().request_log_path)')"

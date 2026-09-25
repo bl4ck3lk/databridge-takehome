@@ -10,6 +10,12 @@ __pycache__/
 !.env.example
 *.db
 *.sqlite3
+*-journal
+*-wal
+*-shm
+*.requests.jsonl
+*.requests.jsonl.*
+*.owner.lock
 state/
 sftp_data/
 known_hosts
