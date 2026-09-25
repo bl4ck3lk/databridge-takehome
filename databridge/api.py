@@ -20,6 +20,7 @@ from databridge.errors import DataBridgeError
 from databridge.models import (
     ConnectionInput,
     ConnectionView,
+    ErrorResponse,
     FileList,
     HealthcheckResult,
     LocalConnection,
@@ -54,6 +55,12 @@ _HTTP_STATUS = {
     "SFTP_OPERATION_FAILED": 502,
     "SFTP_UNAVAILABLE": 503,
 }
+
+
+def _error_responses(*status_codes: int) -> dict[int, dict[str, object]]:
+    return {
+        code: {"model": ErrorResponse, "description": "DataBridge error"} for code in status_codes
+    }
 
 
 def _error_response(
@@ -111,7 +118,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.request_log = request_log
             yield
 
-    application = FastAPI(title="DataBridge", version="0.1.0", lifespan=lifespan)
+    application = FastAPI(
+        title="DataBridge",
+        version="0.1.0",
+        lifespan=lifespan,
+        responses={422: {"model": ErrorResponse, "description": "Invalid request"}},
+    )
 
     @application.middleware("http")
     async def log_request(request: Request, call_next):
@@ -174,7 +186,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _error_response(422, "INVALID_REQUEST", f"{field} {problem}")
 
     @application.post(
-        "/connections", response_model=ConnectionView, status_code=status.HTTP_201_CREATED
+        "/connections",
+        response_model=ConnectionView,
+        status_code=status.HTTP_201_CREATED,
+        responses=_error_responses(400, 409),
     )
     def create_connection(
         item: Annotated[
@@ -238,25 +253,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_connections(request: Request) -> list[ConnectionView]:
         return request.app.state.store.list_public()
 
-    @application.get("/connections/{name}", response_model=ConnectionView)
+    @application.get(
+        "/connections/{name}", response_model=ConnectionView, responses=_error_responses(404)
+    )
     def get_connection(name: str, request: Request) -> ConnectionView:
         return request.app.state.store.get_public(name)
 
-    @application.get("/connections/{name}/files", response_model=FileList)
+    @application.get(
+        "/connections/{name}/files",
+        response_model=FileList,
+        responses=_error_responses(404, 500, 502, 503),
+    )
     def list_files(name: str, request: Request) -> FileList:
         item = request.app.state.store.get(name)
         connector = connector_for(item, request.app.state.settings.known_hosts_path)
         listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
 
-    @application.post("/connections/{name}/healthcheck", response_model=HealthcheckResult)
+    @application.post(
+        "/connections/{name}/healthcheck",
+        response_model=HealthcheckResult,
+        responses=_error_responses(404, 500, 502, 503),
+    )
     def healthcheck(name: str, request: Request) -> HealthcheckResult:
         item = request.app.state.store.get(name)
         connector = connector_for(item, request.app.state.settings.known_hosts_path)
         connector.list_files()
         return HealthcheckResult(connection=name, reachable=True)
 
-    @application.get("/connections/{name}/files/{filename}/head", response_model=PreviewResult)
+    @application.get(
+        "/connections/{name}/files/{filename}/head",
+        response_model=PreviewResult,
+        responses=_error_responses(400, 404, 500, 502, 503),
+    )
     def preview_file(
         name: str, filename: str, request: Request, limit: int = Query(default=5, ge=1, le=100)
     ) -> PreviewResult:
@@ -265,9 +294,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return preview(connector, filename, limit)
 
     @application.post(
-        "/transfers", response_model=TransferRecord, status_code=status.HTTP_201_CREATED
+        "/transfers",
+        response_model=TransferRecord,
+        status_code=status.HTTP_201_CREATED,
+        responses={
+            **_error_responses(400, 404, 409, 500, 502, 503),
+            201: {
+                "description": (
+                    "Transfer completed. The full response also includes null "
+                    "failed_at, failure_phase, and error fields."
+                ),
+                "content": {
+                    "application/json": {
+                        "example": {
+                            "id": "00000000-0000-4000-8000-000000000001",
+                            "source": "local_data",
+                            "source_file": "customers.csv",
+                            "destination": "remote_server",
+                            "destination_file": "customers.csv",
+                            "status": "completed",
+                            "started_at": "2026-09-24T15:00:00+00:00",
+                            "completed_at": "2026-09-24T15:00:01+00:00",
+                            "bytes_copied": 1005,
+                        }
+                    }
+                },
+            },
+        },
     )
-    def transfer_file(item: TransferRequest, request: Request) -> TransferRecord:
+    def transfer_file(
+        item: Annotated[
+            TransferRequest,
+            Body(
+                description=(
+                    "Create the named connections first. Source and destination files are names "
+                    "at their configured roots. Run the upload before the download example."
+                ),
+                openapi_examples={
+                    "upload": {
+                        "summary": "Local to SFTP",
+                        "value": {
+                            "source": "local_data",
+                            "source_file": "customers.csv",
+                            "destination": "remote_server",
+                            "destination_file": "customers.csv",
+                            "overwrite": False,
+                        },
+                    },
+                    "download": {
+                        "summary": "SFTP to local",
+                        "value": {
+                            "source": "remote_server",
+                            "source_file": "customers.csv",
+                            "destination": "local_output",
+                            "destination_file": "downloaded.csv",
+                            "overwrite": False,
+                        },
+                    },
+                },
+            ),
+        ],
+        request: Request,
+    ) -> TransferRecord:
         request.state.body_params = _body_log_fields(item.model_dump(), "/transfers")
         service = TransferService(
             request.app.state.store,
@@ -279,7 +367,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.transfer_id = record.id
         return record
 
-    @application.get("/transfers/{transfer_id}", response_model=TransferRecord)
+    @application.get(
+        "/transfers/{transfer_id}",
+        response_model=TransferRecord,
+        responses=_error_responses(404),
+    )
     def get_transfer(transfer_id: str, request: Request) -> TransferRecord:
         return request.app.state.store.get_transfer(transfer_id)
 

@@ -20,7 +20,8 @@ smoke:
 	@uv run --extra dev python scripts/smoke.py
 
 run:
-	uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1 --no-access-log
+	@printf '\nStarting DataBridge\n  API      http://127.0.0.1:8080\n  Docs     http://127.0.0.1:8080/docs\n  OpenAPI  http://127.0.0.1:8080/openapi.json\n  Logs     make logs (in another terminal)\n\n'
+	@uv run --env-file .env uvicorn databridge.api:app --host 127.0.0.1 --port 8080 --workers 1 --no-access-log
 
 logs:
 	@tail -n 50 -F state/databridge.requests.jsonl

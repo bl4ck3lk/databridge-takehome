@@ -55,6 +55,16 @@ class HealthcheckResult(BaseModel):
     reachable: Literal[True]
 
 
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    transfer_id: str | None
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
 class PreviewResult(BaseModel):
     filename: str
     format: Literal["csv", "json"]

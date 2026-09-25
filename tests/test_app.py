@@ -6,11 +6,13 @@ from fastapi.testclient import TestClient
 
 from databridge.api import create_app
 from databridge.config import Settings
+from databridge.models import ErrorResponse
 
 
 def test_openapi_is_served(settings: Settings) -> None:
     with TestClient(create_app(settings)) as client:
         response = client.get("/openapi.json")
+        invalid = client.post("/transfers", json={})
 
     assert response.status_code == 200
     document = response.json()
@@ -37,6 +39,34 @@ def test_openapi_is_served(settings: Settings) -> None:
     }
     assert connection_body["examples"]["local_output"]["value"]["path"] == "output"
     assert connection_body["examples"]["sftp"]["value"]["root"] == "data"
+    transfer_post = document["paths"]["/transfers"]["post"]
+    transfer_body = transfer_post["requestBody"]["content"]["application/json"]
+    assert transfer_body["examples"]["upload"]["value"] == {
+        "source": "local_data",
+        "source_file": "customers.csv",
+        "destination": "remote_server",
+        "destination_file": "customers.csv",
+        "overwrite": False,
+    }
+    assert transfer_body["examples"]["download"]["value"] == {
+        "source": "remote_server",
+        "source_file": "customers.csv",
+        "destination": "local_output",
+        "destination_file": "downloaded.csv",
+        "overwrite": False,
+    }
+    created = transfer_post["responses"]["201"]["content"]["application/json"]
+    assert created["schema"]["$ref"] == "#/components/schemas/TransferRecord"
+    assert created["example"]["status"] == "completed"
+    assert transfer_post["responses"]["422"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    assert transfer_post["responses"]["409"]["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorResponse"
+    }
+    assert "HTTPValidationError" not in document["components"]["schemas"]
+    assert invalid.status_code == 422
+    assert ErrorResponse.model_validate(invalid.json()).error.code == "INVALID_REQUEST"
 
 
 def test_request_log_records_error_params_without_secrets(

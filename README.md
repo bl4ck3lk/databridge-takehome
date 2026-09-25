@@ -38,8 +38,9 @@ The first run explicitly trusts the key presented by this **local test
 container**. Later runs retain the saved key; runtime SFTP connections reject
 untrusted or changed keys. The Compose project stores server host keys in a
 named volume, so normal container recreation keeps them stable.
-`docker compose down -v` removes that volume;
-repeat the trust bootstrap if you use it. The image is linux/amd64; on ARM
+`docker compose down -v` removes that volume. If you intentionally remove it,
+run `rm known_hosts` before the next `make quickstart` to trust the replacement
+local container key. The image is linux/amd64; on ARM
 Docker engines it runs under emulation. If the SFTP mount is not writable on
 your platform, inspect permissions on `sftp_data/` before running integration.
 
@@ -53,6 +54,10 @@ the repository root after `make run` is listening:
 For `POST /connections` in Swagger UI, select the `local_data`, `local_output`,
 or `sftp` example before sending it. The generic `"string"` placeholder is a
 literal path, not a reference to the sample data.
+For `POST /transfers`, select the `upload` or `download` example. Create the
+named connections first, then run the upload before the download. The transfer
+uses the filename at each connection's root, and a repeated destination returns
+409 unless you explicitly set `"overwrite":true`.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/connections \
@@ -99,8 +104,9 @@ a transfer record was created.
 
 File names are limited to one file at the configured root. Listings return at
 most 1,000 names after scanning at most 10,000 entries, with `truncated` when a
-cap stops enumeration. Preview returns five rows by default (maximum 100) and
-reads at most 1 MiB. CSV values remain strings; JSON values retain their types.
+cap stops enumeration. Preview returns five rows by default (maximum 100),
+parses at most 1 MiB, and reads one extra byte to detect truncation. CSV values
+remain strings; JSON values retain their types.
 Schema inference ignores empty/null values, widens integer plus float to float,
 and uses string for incompatible values or an entirely empty field. JSON numeric
 and boolean strings remain strings; ISO date strings infer as dates. A small JSON

@@ -27,7 +27,7 @@ def _failure(code: str, message: str) -> DataBridgeError:
 def _read_prefix(connector: Connector, filename: str) -> tuple[str, bool]:
     with connector.read(filename) as source:
         data = source.read(MAX_PREVIEW_BYTES)
-    at_limit = len(data) == MAX_PREVIEW_BYTES
+        at_limit = len(data) == MAX_PREVIEW_BYTES and bool(source.read(1))
     try:
         decoder = codecs.getincrementaldecoder("utf-8-sig")()
         return decoder.decode(data, final=not at_limit), at_limit

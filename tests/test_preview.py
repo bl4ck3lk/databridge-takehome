@@ -105,3 +105,17 @@ def test_preview_rejects_a_record_beyond_byte_budget(settings: Settings, tmp_pat
         response = client.get("/connections/files/files/wide.csv/head")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "PREVIEW_LIMIT_EXCEEDED"
+
+
+def test_preview_accepts_exact_byte_budget_without_final_newline(
+    settings: Settings, tmp_path: Path
+) -> None:
+    prefix = b"field\n" + (b"x" * 10_000 + b"\n") * 99
+    final_row = b"y" * (MAX_PREVIEW_BYTES - len(prefix))
+    (tmp_path / "exact.csv").write_bytes(prefix + final_row)
+    with TestClient(create_app(settings)) as client:
+        client.post("/connections", json={"name": "files", "type": "local", "path": str(tmp_path)})
+        response = client.get("/connections/files/files/exact.csv/head?limit=100")
+    assert response.status_code == 200
+    assert len(response.json()["rows"]) == 100
+    assert response.json()["rows"][-1]["field"] == final_row.decode()
