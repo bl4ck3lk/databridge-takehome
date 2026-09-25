@@ -172,8 +172,10 @@ def test_invalid_host_names_are_rejected_at_creation(settings: Settings, host: s
     ids=["path-newline", "path-nul", "path-too-long", "root-return", "root-delete", "user-tab"],
 )
 def test_text_settings_reject_control_characters_and_overlong_values(
-    settings: Settings, field: str, value: str
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: str
 ) -> None:
+    # A regression would create a relative local root; keep it out of the checkout.
+    monkeypatch.chdir(tmp_path)
     body = (
         {"name": "files", "type": "local", "path": value}
         if field == "path"
