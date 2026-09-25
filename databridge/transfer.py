@@ -42,7 +42,7 @@ class TransferLedger(Protocol):
 
     def get(self, name: str) -> Connection: ...
 
-    def start_transfer(self, transfer_id: str, request: TransferRequest) -> TransferRecord: ...
+    def start_transfer(self, transfer_id: str, request: TransferRequest) -> None: ...
 
     def record_progress(self, transfer_id: str, bytes_copied: int) -> None: ...
 
@@ -57,7 +57,7 @@ class TransferLedger(Protocol):
         phase: FailurePhase,
         code: ErrorCode,
         message: str,
-    ) -> TransferRecord: ...
+    ) -> None: ...
 
 
 class TransferService:
@@ -127,6 +127,10 @@ class _Transfer:
                     self.request.destination_file, self.id, self.request.overwrite
                 ) as writer:
                     self._copy(reader, writer)
+                    # Every write result is collected here, so a late failure is still a write
+                    # failure, and "publishing" means every byte is stored and verified.
+                    self.phase = "destination_write"
+                    writer.finish()
                     self.phase = "publication"
                     self.ledger.mark_publishing(self.id, self.copied)
                 published = True

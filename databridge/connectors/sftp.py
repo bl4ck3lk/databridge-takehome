@@ -20,6 +20,7 @@ from paramiko.sftp import (
     CMD_CLOSE,
     CMD_DATA,
     CMD_EXTENDED,
+    CMD_FSTAT,
     CMD_HANDLE,
     CMD_LSTAT,
     CMD_NAME,
@@ -79,6 +80,9 @@ _CONNECT_TIMEOUT = 10
 _REPLY_TIMEOUT = 30
 """Seconds one request may take to send, or its reply to arrive, before the session is closed."""
 _WATCH_INTERVAL = 0.25
+SETTLE_RATE = 10 * 1_048_576
+"""The slowest rate, in bytes per second, at which a server is assumed to sync or close an
+upload; fsync and close get _REPLY_TIMEOUT plus the upload's size at this rate."""
 _LOST = (OSError, EOFError, paramiko.SSHException)
 """Transport failures: every one of them means the session is gone."""
 
@@ -176,8 +180,10 @@ class _Requests:
         with self._watched():
             return int(self._client._async_request(self, kind, *args))  # type: ignore[attr-defined]
 
-    def receive(self, number: int, expected: int = CMD_STATUS) -> _Reader:
-        with self._watched():
+    def receive(
+        self, number: int, expected: int = CMD_STATUS, *, timeout: float | None = None
+    ) -> _Reader:
+        with self._watched(timeout):
             while number not in self._replies:
                 self._client._read_response()  # type: ignore[attr-defined]
         kind, payload = self._replies.pop(number)
@@ -194,14 +200,21 @@ class _Requests:
             raise _Status(SFTP_BAD_MESSAGE, f"reply type {kind} instead of {expected}")
         return reply
 
-    def call(self, kind: int, *args: object, expected: int = CMD_STATUS) -> _Reader:
-        return self.receive(self.send(kind, *args), expected)
+    def call(
+        self,
+        kind: int,
+        *args: object,
+        expected: int = CMD_STATUS,
+        timeout: float | None = None,
+    ) -> _Reader:
+        return self.receive(self.send(kind, *args), expected, timeout=timeout)
 
     @contextmanager
-    def _watched(self) -> Iterator[None]:
-        """Bound one send or one wait for a reply; report an abandoned step as a timeout."""
+    def _watched(self, timeout: float | None = None) -> Iterator[None]:
+        """Bound one send or one wait for a reply (by default _REPLY_TIMEOUT); report an
+        abandoned step as a timeout."""
         try:
-            with self._watchdog.step(_REPLY_TIMEOUT):
+            with self._watchdog.step(_REPLY_TIMEOUT if timeout is None else timeout):
                 yield
         except _LOST as exc:
             if self._watchdog.expired:
@@ -300,8 +313,7 @@ def _failures(
         if isinstance(exc, TimeoutError):
             raise DataBridgeError(
                 ErrorCode.SFTP_UNAVAILABLE,
-                f"The SFTP server did not respond within {_REPLY_TIMEOUT:g} seconds while "
-                f"trying to {action}",
+                f"The SFTP server did not respond within the time allowed while trying to {action}",
             ) from exc
         raise _unavailable(action) from exc
 
@@ -447,11 +459,16 @@ class _Download:
 class _Upload:
     """A staging file written with up to WINDOW unacknowledged requests (a ByteSink)."""
 
-    def __init__(self, requests: _Requests, handle: bytes, root: str) -> None:
+    def __init__(
+        self, requests: _Requests, handle: bytes, root: str, stage: str, mode: int | None
+    ) -> None:
         self._requests = requests
         self._handle: bytes | None = handle
         self._root = root
+        self._stage = stage
+        self._mode = mode
         self._unacknowledged: deque[int] = deque()
+        self._finished = False
         self.size = 0
 
     def write(self, data: bytes, /) -> None:
@@ -466,17 +483,44 @@ class _Upload:
                 self.size += len(chunk)
 
     def finish(self) -> None:
-        """Collect every write status, sync the data where the server can, and close the file."""
+        """Collect every write status, sync where the server can, close the file, prove every
+        byte is stored, and give the stage the replaced file's mode. A second call does nothing.
+
+        Syncing and closing can take time in proportion to the upload, so they get the reply
+        timeout plus the upload's size at SETTLE_RATE.
+        """
+        if self._finished:
+            return
+        settle = _REPLY_TIMEOUT + self.size / SETTLE_RATE
         with _failures("finish the staging file", denied=_not_writable(self._root)):
             while self._unacknowledged:
                 self._requests.receive(self._unacknowledged.popleft())
             try:
-                self._requests.call(CMD_EXTENDED, "fsync@openssh.com", self._open())
+                self._requests.call(CMD_EXTENDED, "fsync@openssh.com", self._open(), timeout=settle)
             except _Status as status:
                 if status.code != SFTP_OP_UNSUPPORTED:
                     raise
             handle, self._handle = self._open(), None
-            self._requests.call(CMD_CLOSE, handle)
+            self._requests.call(CMD_CLOSE, handle, timeout=settle)
+            stored = self._requests.attributes(CMD_STAT, self._stage).size
+        if stored is None:
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED,
+                "The SFTP server did not report the staging file's size, so the upload cannot "
+                "be verified; nothing was published",
+            )
+        if stored != self.size:
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED,
+                f"The SFTP server stored {stored} of {self.size} bytes of the staging file; "
+                "nothing was published",
+            )
+        if self._mode is not None:
+            attributes = paramiko.SFTPAttributes()
+            attributes.st_mode = self._mode
+            with _failures("copy the replaced file's permissions to the staging file"):
+                self._requests.call(CMD_SETSTAT, self._stage, attributes)
+        self._finished = True
 
     def release(self) -> None:
         for number in self._unacknowledged:
@@ -546,7 +590,7 @@ class SFTPConnector:
         return AccessCheck(writable=True)
 
     @contextmanager
-    def read(self, filename: str) -> Iterator[ByteSource]:
+    def read(self, filename: str, limit: int | None = None) -> Iterator[ByteSource]:
         path = self._path(filename)
         with self._session() as requests:
             with _failures(
@@ -558,8 +602,19 @@ class SFTPConnector:
                     ErrorCode.FILE_NOT_READABLE, f"The SFTP user may not read '{filename}'"
                 ),
             ):
-                size = self._regular_file_size(requests, path, filename)
-                download = _Download(requests, requests.open(path, SFTP_FLAG_READ), size, filename)
+                # STAT first so the server never opens a FIFO or a directory; the size comes
+                # from FSTAT on the opened handle, since the path may name another file by then.
+                self._check_regular(requests, path, filename)
+                handle = requests.open(path, SFTP_FLAG_READ)
+                try:
+                    opened = requests.call(CMD_FSTAT, handle, expected=CMD_ATTRS).attributes()
+                    size = _readable_size(opened, filename)
+                except BaseException:
+                    requests.close_quietly(handle)
+                    raise
+            download = _Download(
+                requests, handle, size if limit is None else min(size, limit), filename
+            )
             try:
                 yield download
             finally:
@@ -578,12 +633,11 @@ class SFTPConnector:
                 denied=_not_writable(self.root),
             ):
                 flags = SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
-                upload = _Upload(requests, requests.open(stage, flags), self.root)
+                upload = _Upload(requests, requests.open(stage, flags), self.root, stage, mode)
             published = False
             try:
                 yield upload
                 upload.finish()
-                self._prepare_stage(requests, stage, upload.size, mode)
                 self._publish(requests, stage, destination, filename, overwrite)
                 published = True
             finally:
@@ -606,7 +660,8 @@ class SFTPConnector:
         )
 
     def _entries(self, requests: _Requests) -> Generator[tuple[str, bool]]:
-        """Yield `(name, is_regular_file)` per entry, reading one READDIR reply at a time."""
+        """Yield `(name, is_regular_file)` for every raw entry, one READDIR reply at a time; an
+        entry the API cannot address yields an empty name, so it still counts as scanned."""
         handle = requests.open_directory(self.root)
         try:
             while True:
@@ -621,28 +676,34 @@ class SFTPConnector:
             requests.close_quietly(handle)
 
     def _classified(
-        self, requests: _Requests, entries: list[tuple[str, _Attributes]]
+        self, requests: _Requests, entries: list[tuple[str | None, _Attributes]]
     ) -> Iterator[tuple[str, bool]]:
-        """READDIR may omit permissions; lstat those entries, pipelined, before classifying."""
-        lookups = {
-            name: requests.send(CMD_LSTAT, posixpath.join(self.root, name))
-            for name, attributes in entries
-            if attributes.mode is None
-        }
-        try:
-            for name, attributes in entries:
-                mode = attributes.mode
-                if name in lookups:
-                    try:
-                        mode = requests.receive(lookups.pop(name), CMD_ATTRS).attributes().mode
-                    except _Status:
-                        mode = None  # removed or hidden since READDIR
-                yield name, mode is not None and stat.S_ISREG(mode)
-        finally:
-            for number in lookups.values():
-                requests.ignore(number)
+        """READDIR may omit permissions; lstat those entries, at most WINDOW at a time."""
+        for start in range(0, len(entries), WINDOW):
+            batch = entries[start : start + WINDOW]
+            lookups = {
+                index: requests.send(CMD_LSTAT, posixpath.join(self.root, name))
+                for index, (name, attributes) in enumerate(batch)
+                if name is not None and attributes.mode is None
+            }
+            try:
+                for index, (name, attributes) in enumerate(batch):
+                    if name is None:
+                        yield "", False
+                        continue
+                    mode = attributes.mode
+                    if index in lookups:
+                        try:
+                            reply = requests.receive(lookups.pop(index), CMD_ATTRS)
+                            mode = reply.attributes().mode
+                        except _Status:
+                            mode = None  # removed or hidden since READDIR
+                    yield name, mode is not None and stat.S_ISREG(mode)
+            finally:
+                for number in lookups.values():
+                    requests.ignore(number)
 
-    def _regular_file_size(self, requests: _Requests, path: str, filename: str) -> int:
+    def _check_regular(self, requests: _Requests, path: str, filename: str) -> None:
         try:
             attributes = requests.attributes(CMD_STAT, path)
         except _Status as status:
@@ -651,12 +712,6 @@ class SFTPConnector:
             raise self._missing(requests, filename) from status
         if attributes.mode is not None and not stat.S_ISREG(attributes.mode):
             raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, f"'{filename}' is not a regular file")
-        if attributes.size is None:
-            raise DataBridgeError(
-                ErrorCode.SFTP_OPERATION_FAILED,
-                f"The SFTP server did not report the size of '{filename}', so it cannot be read",
-            )
-        return attributes.size
 
     def _missing(self, requests: _Requests, filename: str) -> DataBridgeError:
         try:
@@ -687,29 +742,6 @@ class SFTPConnector:
                 ErrorCode.DESTINATION_EXISTS, f"'{filename}' exists and is not a regular file"
             )
         return stat.S_IMODE(attributes.mode)
-
-    @staticmethod
-    def _prepare_stage(requests: _Requests, stage: str, size: int, mode: int | None) -> None:
-        """Prove the server holds every staged byte, then give the stage the replaced mode."""
-        with _failures("check the staging file"):
-            stored = requests.attributes(CMD_STAT, stage).size
-        if stored is None:
-            raise DataBridgeError(
-                ErrorCode.SFTP_OPERATION_FAILED,
-                "The SFTP server did not report the staging file's size, so the upload cannot "
-                "be verified; nothing was published",
-            )
-        if stored != size:
-            raise DataBridgeError(
-                ErrorCode.SFTP_OPERATION_FAILED,
-                f"The SFTP server stored {stored} of {size} bytes of the staging file; "
-                "nothing was published",
-            )
-        if mode is not None:
-            attributes = paramiko.SFTPAttributes()
-            attributes.st_mode = mode
-            with _failures("copy the replaced file's permissions to the staging file"):
-                requests.call(CMD_SETSTAT, stage, attributes)
 
     def _publish(
         self, requests: _Requests, stage: str, destination: str, filename: str, overwrite: bool
@@ -859,17 +891,34 @@ class SFTPConnector:
         return transport
 
 
-def _names(reply: _Reader) -> list[tuple[str, _Attributes]]:
-    """Parse a NAME reply, skipping "." and ".." and names the API cannot express as text."""
-    entries = []
-    for _ in range(reply.uint32()):
+def _names(reply: _Reader) -> list[tuple[str | None, _Attributes]]:
+    """Parse a NAME reply. "." and "..", and names that are not UTF-8 (the API names files with
+    text), get None: the API cannot address them, but they still count as scanned. A directory
+    ends with an end-of-file status, so a page without entries could repeat forever and is a
+    protocol error."""
+    count = reply.uint32()
+    if count == 0:
+        raise _Status(SFTP_BAD_MESSAGE, "a directory page without entries")
+    entries: list[tuple[str | None, _Attributes]] = []
+    for _ in range(count):
         raw_name = reply.string()
         reply.string()  # the "ls -l" style long name
         attributes = reply.attributes()
         try:
-            name = raw_name.decode("utf-8")
+            name: str | None = raw_name.decode("utf-8")
         except UnicodeDecodeError:
-            continue
-        if name not in {".", ".."}:
-            entries.append((name, attributes))
+            name = None
+        entries.append((None if name in {".", ".."} else name, attributes))
     return entries
+
+
+def _readable_size(attributes: _Attributes, filename: str) -> int:
+    """The size of an opened regular file, which bounds how much a read may return."""
+    if attributes.mode is not None and not stat.S_ISREG(attributes.mode):
+        raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, f"'{filename}' is not a regular file")
+    if attributes.size is None:
+        raise DataBridgeError(
+            ErrorCode.SFTP_OPERATION_FAILED,
+            f"The SFTP server did not report the size of '{filename}', so it cannot be read",
+        )
+    return attributes.size

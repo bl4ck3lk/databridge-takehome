@@ -3,23 +3,31 @@
 import os
 import socket
 import stat
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import paramiko
 import pytest
+from paramiko.sftp import CMD_LSTAT
 from pydantic import SecretStr
 from sftp_server import PASSWORD, USERNAME, FakeSFTPServer, Scenario
 from support import read_all
 
+from databridge.config import Settings
 from databridge.connectors import base, sftp
+from databridge.connectors.base import Listing
+from databridge.connectors.local import LocalConnector
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError, ErrorCode
-from databridge.models import SFTPConnection
+from databridge.models import LocalConnection, SFTPConnection, TransferRequest
+from databridge.store import ConnectionStore
+from databridge.transfer import TransferService
 
 MIB = 1_048_576
 PAYLOAD = bytes(range(256)) * (4 * MIB // 256) + b"tail"
@@ -449,3 +457,134 @@ def test_settings_that_cannot_be_encoded_are_invalid(remote: Remote, host: str, 
     )
     error = _error(SFTPConnector(connection, remote.known_hosts).list_files)
     assert error.code == ErrorCode.INVALID_CONNECTION_SETTINGS
+
+
+@pytest.mark.parametrize("pages", ["empty", "dots"])
+def test_a_directory_that_never_ends_is_bounded(
+    serve: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch, pages: str
+) -> None:
+    monkeypatch.setattr(base, "MAX_LIST_SCAN", 50)
+    remote = serve(Scenario(endless_readdir=pages))
+    outcome: list[object] = []
+
+    def list_files() -> None:
+        try:
+            outcome.append(remote.connector().list_files())
+        except DataBridgeError as error:
+            outcome.append(error)
+
+    # A regression would loop forever, so the listing runs where the test can stop waiting.
+    worker = threading.Thread(target=list_files, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert outcome, "the listing did not end within 5 seconds"
+    if pages == "empty":
+        assert isinstance(outcome[0], DataBridgeError)
+        assert outcome[0].code == ErrorCode.SFTP_OPERATION_FAILED
+    else:
+        # "." and ".." still count as scanned entries, so the scan cap ends the listing.
+        assert isinstance(outcome[0], Listing)
+        assert (outcome[0].files, outcome[0].truncated) == ([], True)
+
+
+def test_read_uses_the_size_of_the_file_it_opened(serve: Callable[..., Remote]) -> None:
+    replaced: list[str] = []
+
+    def replace_after_stat(path: str) -> None:
+        if path.endswith("report.csv") and not replaced:
+            replaced.append(path)
+            staged = remote.files / "report.tmp"
+            staged.write_bytes(b"b" * 200)
+            os.replace(staged, remote.files / "report.csv")
+
+    remote = serve(Scenario(after_stat=replace_after_stat))
+    (remote.files / "report.csv").write_bytes(b"a" * 100)
+    assert _read(remote.connector(), "report.csv") == b"b" * 200
+    assert replaced
+
+
+def test_sync_and_close_get_time_in_proportion_to_the_upload(
+    serve: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sftp, "_REPLY_TIMEOUT", 0.3)
+    monkeypatch.setattr(sftp, "SETTLE_RATE", MIB)
+    remote = serve(Scenario(fsync_seconds=1.0))
+    _write(remote.connector(), "target.bin", PAYLOAD)
+    assert (remote.files / "target.bin").read_bytes() == PAYLOAD
+
+
+def test_a_limited_read_requests_only_what_it_may_return(remote: Remote) -> None:
+    (remote.files / "big.bin").write_bytes(PAYLOAD)
+    with remote.connector().read("big.bin", limit=100) as source:
+        assert read_all(source) == PAYLOAD[:100]
+    assert remote.scenario.calls["read"] == 1
+
+
+def test_permission_lookups_stay_within_the_request_window(
+    serve: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sftp, "WINDOW", 4)
+    remote = serve(Scenario(omit_permissions=True))
+    for index in range(40):
+        (remote.files / f"file-{index:02}.csv").write_text("a\n")
+    outstanding: set[int] = set()
+    peak = [0]
+    send, receive, ignore = sftp._Requests.send, sftp._Requests.receive, sftp._Requests.ignore
+
+    def counting_send(self: sftp._Requests, kind: int, *args: object) -> int:
+        number = send(self, kind, *args)
+        if kind == CMD_LSTAT:
+            outstanding.add(number)
+            peak[0] = max(peak[0], len(outstanding))
+        return number
+
+    def counting_receive(self: sftp._Requests, number: int, *args: Any, **kw: Any) -> Any:
+        outstanding.discard(number)
+        return receive(self, number, *args, **kw)
+
+    def counting_ignore(self: sftp._Requests, number: int) -> None:
+        outstanding.discard(number)
+        ignore(self, number)
+
+    monkeypatch.setattr(sftp._Requests, "send", counting_send)
+    monkeypatch.setattr(sftp._Requests, "receive", counting_receive)
+    monkeypatch.setattr(sftp._Requests, "ignore", counting_ignore)
+    assert len(remote.connector().list_files().files) == 40
+    assert 0 < peak[0] <= 4
+
+
+def test_a_failed_tail_write_is_a_write_failure_not_a_publication(
+    serve: Callable[..., Remote],
+    settings: Settings,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote = serve(Scenario(fail_write_at=3 * MIB))
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "data.bin").write_bytes(PAYLOAD)
+    store = ConnectionStore(settings.database_path, settings.encryption_key)
+    store.initialize()
+    store.create(LocalConnection(name="local", type="local", path=str(source_root)))
+    sftp_connector = remote.connector()
+    store.create(sftp_connector.connection)
+    connectors: dict[str, Any] = {"local": LocalConnector(source_root), "remote": sftp_connector}
+    marked: list[str] = []
+    mark_publishing = store.mark_publishing
+
+    def spy(transfer_id: str, bytes_copied: int) -> None:
+        marked.append(transfer_id)
+        mark_publishing(transfer_id, bytes_copied)
+
+    monkeypatch.setattr(store, "mark_publishing", spy)
+    service = TransferService(store, lambda connection: connectors[connection.name])
+    request = TransferRequest(
+        source="local", source_file="data.bin", destination="remote", destination_file="t.bin"
+    )
+    error = _error(lambda: service.run(request))
+    assert error.code == ErrorCode.SFTP_OPERATION_FAILED
+    assert error.transfer_id is not None
+    record = store.get_transfer(error.transfer_id)
+    assert (record.status, record.failure_phase) == ("failed", "destination_write")
+    assert marked == []
+    assert not (remote.files / "t.bin").exists()

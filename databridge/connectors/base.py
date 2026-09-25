@@ -45,25 +45,37 @@ class ByteSource(Protocol):
 
 
 class ByteSink(Protocol):
-    """A writable byte stream; `write` stores every byte or raises DataBridgeError."""
+    """A writable staging file.
+
+    `write` passes every byte on or raises DataBridgeError; a connector may report a failed write
+    only later. `finish` waits for every write result, makes the bytes durable where the backend
+    can, and proves they are all stored; after it returns, only publication remains. A connector
+    finishes a sink that its caller did not.
+    """
 
     def write(self, data: bytes, /) -> None: ...
+
+    def finish(self) -> None: ...
 
 
 class Connector(Protocol):
     """File operations at one connection root.
 
     Error contract: every exception that leaves these methods, or the streams they yield, is a
-    DataBridgeError with a stable code. `write` publishes the destination only when its context
-    exits without an error; after any error the destination is absent or unchanged, and the
-    staging file named by `staging_id` has been removed or, if the process stopped, left behind.
+    DataBridgeError with a stable code. `read` yields at most `limit` bytes when one is given, so
+    a caller that needs a prefix does not make the connector fetch more. `write` publishes the
+    destination only when its context exits without an error; after any error the destination is
+    absent or unchanged, and the staging file named by `staging_id` has been removed or, if the
+    process stopped, left behind.
     """
 
     def list_files(self) -> Listing: ...
 
     def check_access(self) -> AccessCheck: ...
 
-    def read(self, filename: str) -> AbstractContextManager[ByteSource]: ...
+    def read(
+        self, filename: str, limit: int | None = None
+    ) -> AbstractContextManager[ByteSource]: ...
 
     def write(
         self, filename: str, staging_id: str, overwrite: bool

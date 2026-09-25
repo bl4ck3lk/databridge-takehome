@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -148,9 +149,39 @@ def test_valid_host_names_are_stored_in_lower_case(
     assert response.json()["host"] == stored
 
 
+def test_scoped_ipv6_address_is_accepted(settings: Settings) -> None:
+    with client_for(settings) as client:
+        response = client.post("/connections", json=_sftp(host="fe80::1%en0"))
+    assert response.status_code == 201
+    assert response.json()["host"] == "fe80::1%en0"
+
+
+def test_password_that_cannot_be_encoded_is_rejected(settings: Settings) -> None:
+    # json.dumps escapes the lone surrogate as \ud800, which is valid JSON text.
+    body = json.dumps(_sftp(password="pass\ud800word")).encode()
+    with client_for(settings) as client:
+        response = client.post(
+            "/connections", content=body, headers={"Content-Type": "application/json"}
+        )
+    assert response.status_code == 422
+    assert [detail["field"] for detail in response.json()["error"]["details"]] == ["password"]
+
+
 @pytest.mark.parametrize(
     "host",
-    ["a" * 64, "bad..name", "-x.example", "exa mple", "host:22", "[::1]", "münchen.de", ""],
+    [
+        "a" * 64,
+        "bad..name",
+        "-x.example",
+        "exa mple",
+        "host:22",
+        "[::1]",
+        "münchen.de",
+        "",
+        "fe80::1%eth0\nINJECTED",
+        "fe80::1%a b",
+        "fe80::1%" + "z" * 65,
+    ],
 )
 def test_invalid_host_names_are_rejected_at_creation(settings: Settings, host: str) -> None:
     with client_for(settings) as client:

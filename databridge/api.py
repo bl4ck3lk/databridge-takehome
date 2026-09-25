@@ -38,6 +38,7 @@ from databridge.web import RequestContextMiddleware, body_log_fields, error_resp
 _ALWAYS_POSSIBLE = (ErrorCode.INVALID_HOST_HEADER, ErrorCode.INTERNAL_ERROR)
 _STATE_CHANGE = (ErrorCode.CROSS_ORIGIN_REJECTED,)
 _SFTP_ACCESS = (
+    ErrorCode.INVALID_CONNECTION_SETTINGS,
     ErrorCode.SFTP_AUTH_FAILED,
     ErrorCode.SFTP_HOST_KEY_REJECTED,
     ErrorCode.SFTP_OPERATION_FAILED,
@@ -230,6 +231,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @application.exception_handler(StarletteHTTPException)
     def routing_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        if exc.status_code == 400:
+            # FastAPI raises a plain 400 when a JSON body cannot be decoded (for example, bytes
+            # that are not UTF-8); that is the client's malformed request, not a server fault.
+            request.state.error_code = ErrorCode.INVALID_REQUEST
+            body = FieldProblem(field="request body", problem="is not valid JSON")
+            return error_response(
+                ErrorCode.INVALID_REQUEST, "request body is not valid JSON", details=[body]
+            )
         code, message = _ROUTING_ERRORS.get(
             exc.status_code, (ErrorCode.INTERNAL_ERROR, "Unexpected HTTP error")
         )
@@ -344,6 +353,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ErrorCode.PREVIEW_LIMIT_EXCEEDED,
             ErrorCode.FILE_NOT_READABLE,
             ErrorCode.SOURCE_CHANGED,
+            ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
             ErrorCode.LOCAL_IO_ERROR,
             *_SFTP_ACCESS,
         ),

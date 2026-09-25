@@ -116,6 +116,9 @@ class _Sink:
         self.connector.step("destination_write")
         self.data += data
 
+    def finish(self) -> None:
+        self.connector.step("destination_finish")
+
 
 @pytest.fixture
 def store(settings: Settings, tmp_path: Path) -> ConnectionStore:
@@ -233,20 +236,33 @@ def test_missing_connection_names_its_side(
 
 
 @pytest.mark.parametrize(
-    ("side", "step"),
+    ("side", "step", "phase"),
     [
-        ("source", "source_open"),
-        ("source", "source_read"),
-        ("destination", "destination_open"),
-        ("destination", "destination_write"),
-        ("destination", "publication"),
+        ("source", "source_open", "source_open"),
+        ("source", "source_read", "source_read"),
+        ("destination", "destination_open", "destination_open"),
+        ("destination", "destination_write", "destination_write"),
+        ("destination", "destination_finish", "destination_write"),
+        ("destination", "publication", "publication"),
     ],
 )
 def test_each_failure_records_its_phase_code_and_side(
-    store: ConnectionStore, side: str, step: str
+    store: ConnectionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    side: str,
+    step: str,
+    phase: str,
 ) -> None:
     source = _Scripted({"source.bin": PAYLOAD}, fail_at=step if side == "source" else None)
     destination = _Scripted({}, fail_at=step if side == "destination" else None)
+    marked: list[str] = []
+    mark_publishing = store.mark_publishing
+
+    def spy(transfer_id: str, bytes_copied: int) -> None:
+        marked.append(transfer_id)
+        mark_publishing(transfer_id, bytes_copied)
+
+    monkeypatch.setattr(store, "mark_publishing", spy)
 
     error = _error(lambda: _service(store, source, destination).run(_request()))
 
@@ -256,9 +272,11 @@ def test_each_failure_records_its_phase_code_and_side(
     record = store.get_transfer(error.transfer_id)
     assert (record.status, record.failure_phase, record.error_code) == (
         "failed",
-        step,
+        phase,
         ErrorCode.SFTP_UNAVAILABLE,
     )
+    # A record reaches "publishing" only once every byte is stored and verified.
+    assert bool(marked) == (phase == "publication")
     assert "target.bin" not in destination.files
 
 

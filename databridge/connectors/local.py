@@ -5,7 +5,7 @@ import logging
 import os
 import stat
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from uuid import uuid4
 
@@ -75,19 +75,48 @@ class _FileSource:
 
 
 class _FileSink:
-    def __init__(self, descriptor: int) -> None:
+    def __init__(self, descriptor: int, existing: os.stat_result | None) -> None:
         self._descriptor = descriptor
+        self._existing = existing
         self.bytes_written = 0
 
     def write(self, data: bytes, /) -> None:
         view = memoryview(data)
         while view:
             try:
-                written = os.write(self._descriptor, view)
+                written = os.write(self._open(), view)
             except OSError as exc:
                 raise _write_error(exc, "write the staging file") from exc
             view = view[written:]
             self.bytes_written += written
+
+    def finish(self) -> None:
+        """Sync, verify, and close the staging file; a second call does nothing."""
+        if self._descriptor < 0:
+            return
+        descriptor, self._descriptor = self._descriptor, -1
+        try:
+            _persist(descriptor, self.bytes_written, self._existing)
+        except BaseException:
+            with suppress(OSError):
+                os.close(descriptor)
+            raise
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            raise _write_error(exc, "close the staging file") from exc
+
+    def release(self) -> None:
+        """Close an unfinished staging file after a failure."""
+        if self._descriptor >= 0:
+            descriptor, self._descriptor = self._descriptor, -1
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def _open(self) -> int:
+        if self._descriptor < 0:
+            raise RuntimeError("The staging file is already closed")
+        return self._descriptor
 
 
 class LocalConnector:
@@ -169,12 +198,13 @@ class LocalConnector:
             raise DataBridgeError(
                 ErrorCode.LOCAL_IO_ERROR, "Cannot test write access to the connection directory"
             ) from exc
-        os.close(descriptor)
+        with suppress(OSError):  # the probe exists, so the root is writable either way
+            os.close(descriptor)
         _remove(probe)
         return AccessCheck(writable=True)
 
     @contextmanager
-    def read(self, filename: str) -> Iterator[ByteSource]:
+    def read(self, filename: str, limit: int | None = None) -> Iterator[ByteSource]:
         _root, path = self._resolve(filename)
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -193,15 +223,23 @@ class LocalConnector:
                 ) from exc
             raise DataBridgeError(ErrorCode.LOCAL_IO_ERROR, "Cannot open the local file") from exc
         try:
-            opened = os.fstat(descriptor)
+            try:
+                opened = os.fstat(descriptor)
+                if stat.S_ISREG(opened.st_mode):
+                    os.set_blocking(descriptor, True)
+            except OSError as exc:
+                raise DataBridgeError(
+                    ErrorCode.LOCAL_IO_ERROR, f"Cannot inspect the opened file '{filename}'"
+                ) from exc
             if not stat.S_ISREG(opened.st_mode):
                 raise DataBridgeError(
                     ErrorCode.FILE_NOT_FOUND, f"'{filename}' is not a regular file"
                 )
-            os.set_blocking(descriptor, True)
-            yield _FileSource(descriptor, opened.st_size, filename)
+            size = opened.st_size if limit is None else min(opened.st_size, limit)
+            yield _FileSource(descriptor, size, filename)
         finally:
-            os.close(descriptor)
+            with suppress(OSError):  # every byte was read; closing cannot change the result
+                os.close(descriptor)
 
     @contextmanager
     def write(self, filename: str, staging_id: str, overwrite: bool) -> Iterator[ByteSink]:
@@ -215,17 +253,14 @@ class LocalConnector:
             if exc.errno in _MISSING:
                 raise _root_unavailable() from exc
             raise _write_error(exc, "create the staging file") from exc
+        sink = _FileSink(descriptor, existing)
         try:
-            sink = _FileSink(descriptor)
             yield sink
-            _persist(descriptor, sink.bytes_written, existing)
-            os.close(descriptor)
-            descriptor = -1
+            sink.finish()
             _publish(stage, destination, filename, overwrite)
             _sync_directory(root)
         finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+            sink.release()
             _remove(stage)
 
 

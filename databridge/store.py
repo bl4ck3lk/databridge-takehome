@@ -75,6 +75,23 @@ def _private_directory(directory: Path) -> None:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
+def _change(
+    connection: sqlite3.Connection,
+    transfer_id: str,
+    statement: str,
+    parameters: tuple[object, ...],
+) -> None:
+    """Apply a compare-and-set state change; a record in another state is a conflict, never a
+    silent no-op, and the enclosing transaction commits nothing."""
+    if connection.execute(statement, parameters).rowcount != 1:
+        raise DataBridgeError(
+            ErrorCode.TRANSFER_STATE_CONFLICT,
+            "The transfer record is not in the state this change requires; another operation "
+            "already changed it",
+            transfer_id,
+        )
+
+
 def _connection_not_found(name: str) -> DataBridgeError:
     return DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, f"Connection '{name}' not found")
 
@@ -291,7 +308,7 @@ class ConnectionStore:
         _input_model, view_model = _connection_models(kind)
         return view_model.model_validate({"name": name, "type": kind, **settings})
 
-    def start_transfer(self, transfer_id: str, request: TransferRequest) -> TransferRecord:
+    def start_transfer(self, transfer_id: str, request: TransferRequest) -> None:
         now = _now()
         with self._recording(transfer_id) as connection:
             connection.execute(
@@ -310,7 +327,6 @@ class ConnectionStore:
                     now,
                 ),
             )
-        return self.get_transfer(transfer_id)
 
     def record_progress(self, transfer_id: str, bytes_copied: int) -> None:
         self._transition(
@@ -329,14 +345,21 @@ class ConnectionStore:
         )
 
     def finish_transfer(self, transfer_id: str) -> TransferRecord:
+        """Complete a publishing record and return it; if it cannot be read back, nothing
+        changes, so a completed record is always one the caller could report."""
         now = _now()
-        self._transition(
-            transfer_id,
-            """UPDATE transfers SET status = 'completed', completed_at = ?, updated_at = ?
-            WHERE id = ? AND status = 'publishing'""",
-            (now, now, transfer_id),
-        )
-        return self.get_transfer(transfer_id)
+        with self._recording(transfer_id) as connection:
+            _change(
+                connection,
+                transfer_id,
+                """UPDATE transfers SET status = 'completed', completed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'publishing'""",
+                (now, now, transfer_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM transfers WHERE id = ?", (transfer_id,)
+            ).fetchone()
+            return TransferRecord.model_validate(dict(row))
 
     def fail_transfer(
         self,
@@ -345,7 +368,7 @@ class ConnectionStore:
         phase: FailurePhase,
         code: ErrorCode,
         message: str,
-    ) -> TransferRecord:
+    ) -> None:
         now = _now()
         self._transition(
             transfer_id,
@@ -354,20 +377,10 @@ class ConnectionStore:
             WHERE id = ? AND status IN ('running', 'publishing')""",
             (now, now, bytes_copied, phase, code.value, message, transfer_id),
         )
-        return self.get_transfer(transfer_id)
 
     def _transition(self, transfer_id: str, statement: str, parameters: tuple[object, ...]) -> None:
-        """Apply a compare-and-set state change; a record in another state is a conflict, never
-        a silent no-op."""
         with self._recording(transfer_id) as connection:
-            changed = connection.execute(statement, parameters).rowcount
-        if changed != 1:
-            raise DataBridgeError(
-                ErrorCode.TRANSFER_STATE_CONFLICT,
-                "The transfer record is not in the state this change requires; another "
-                "operation already changed it",
-                transfer_id,
-            )
+            _change(connection, transfer_id, statement, parameters)
 
     @contextmanager
     def _recording(self, transfer_id: str) -> Iterator[sqlite3.Connection]:
@@ -378,7 +391,8 @@ class ConnectionStore:
         except sqlite3.Error as exc:
             raise DataBridgeError(
                 ErrorCode.TRANSFER_RECORD_FAILED,
-                f"The transfer record could not be saved ({exc.sqlite_errorname})",
+                "The transfer record could not be saved "
+                f"({getattr(exc, 'sqlite_errorname', type(exc).__name__)})",
                 transfer_id,
             ) from exc
 

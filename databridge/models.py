@@ -22,6 +22,7 @@ from databridge.errors import ErrorCode
 
 MAX_SETTING_LENGTH = 4096
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_SCOPE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def _plain_text(value: str) -> str:
@@ -38,9 +39,14 @@ def _plain_text(value: str) -> str:
 def _host(value: str) -> str:
     """Accept an IP address or an ASCII DNS name, in lower case as OpenSSH records hosts."""
     try:
-        return str(ipaddress.ip_address(value))
+        address = ipaddress.ip_address(value)
     except ValueError:
         pass
+    else:
+        scope = getattr(address, "scope_id", None)
+        if scope is not None and not _SCOPE_ID.fullmatch(scope):
+            raise ValueError("must use an IPv6 zone of ASCII letters, digits, '.', '_', or '-'")
+        return str(address)
     name = value.lower()
     if len(name) > 253 or not all(_HOST_LABEL.fullmatch(label) for label in name.split(".")):
         raise ValueError(
@@ -56,7 +62,18 @@ SettingText = Annotated[
     StringConstraints(min_length=1, max_length=MAX_SETTING_LENGTH),
     AfterValidator(_plain_text),
 ]
-HostName = Annotated[str, StringConstraints(min_length=1), AfterValidator(_host)]
+HostName = Annotated[str, StringConstraints(min_length=1, max_length=253), AfterValidator(_host)]
+
+
+def _encodable_secret(value: SecretStr) -> SecretStr:
+    try:
+        value.get_secret_value().encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("must be valid Unicode text") from None
+    return value
+
+
+Secret = Annotated[SecretStr, AfterValidator(_encodable_secret)]
 
 
 class _ConnectionInput(BaseModel):
@@ -85,7 +102,7 @@ class SFTPConnection(_ConnectionInput):
         validation_alias=AliasChoices("username", "user"),
         description="SFTP login name; the brief's `user` field is accepted too",
     )
-    password: SecretStr = Field(min_length=1)
+    password: Secret = Field(min_length=1)
     root: SettingText = Field(
         description=(
             "Directory on the SFTP server that holds the files, relative to the login directory "
@@ -169,6 +186,8 @@ class PreviewResult(BaseModel):
 
 
 class TransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source: ConnectionName
     source_file: str = Field(min_length=1)
     destination: ConnectionName

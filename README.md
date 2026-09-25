@@ -66,6 +66,11 @@ ssh-keygen -R '[localhost]:2222' -f known_hosts
 make quickstart
 ```
 
+Use your `DATABRIDGE_SFTP_PORT` if it is not 2222. A checkout that started the
+fixture before per-checkout project names used the Compose project
+`databridge_takehome`; stop it with `docker compose -p databridge_takehome down`
+and remove its entries as above before rerunning quickstart.
+
 The image is linux/amd64; on ARM Docker engines it runs under emulation.
 
 ## API examples

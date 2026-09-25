@@ -18,6 +18,7 @@ MAX_PREVIEW_BYTES = 1_048_576
 DEFAULT_PREVIEW_ROWS = 5
 MAX_PREVIEW_ROWS = 100
 MAX_JSON_DEPTH = 32
+_TOKEN_TAIL = 6  # the longest cut token that can end a budget: a "\uXXXX" escape
 InferredType = Literal["string", "integer", "float", "boolean", "date"]
 _INTEGER = re.compile(r"[+-]?[0-9]+")
 _FLOAT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
@@ -51,7 +52,7 @@ def preview(connector: Connector, filename: str, limit: int) -> PreviewResult:
 def _read_prefix(connector: Connector, filename: str) -> tuple[str, bool]:
     """Read one byte past the budget, through short reads, to learn whether the file is longer."""
     data = bytearray()
-    with connector.read(filename) as source:
+    with connector.read(filename, limit=MAX_PREVIEW_BYTES + 1) as source:
         while len(data) <= MAX_PREVIEW_BYTES:
             chunk = source.read(MAX_PREVIEW_BYTES + 1 - len(data))
             if not chunk:
@@ -170,7 +171,9 @@ def _json_prefix(text: str, limit: int) -> list[dict[str, Any]]:
         try:
             item, position = _DECODER.raw_decode(text, position)
         except json.JSONDecodeError as exc:
-            raise _incomplete() from exc
+            if _cut_by_budget(exc, text):
+                raise _incomplete() from exc
+            raise DataBridgeError(ErrorCode.MALFORMED_FILE, "The JSON file is malformed") from exc
         if not isinstance(item, dict):
             raise DataBridgeError(ErrorCode.MALFORMED_FILE, "JSON array entries must be objects")
         rows.append(item)
@@ -191,6 +194,13 @@ def _json_prefix(text: str, limit: int) -> list[dict[str, Any]]:
             return _end_of_array(text, position, rows)
         position += 1
         after_comma = True
+
+
+def _cut_by_budget(error: json.JSONDecodeError, text: str) -> bool:
+    """Whether more bytes could still complete the entry. The decoder reports an unterminated
+    string at its start and a cut number or escape a few characters before the end; any other
+    error proves the entry malformed whatever follows."""
+    return error.msg.startswith("Unterminated string") or error.pos >= len(text) - _TOKEN_TAIL
 
 
 def _skip_space(text: str, position: int) -> int:

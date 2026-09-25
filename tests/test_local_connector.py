@@ -240,6 +240,60 @@ def test_cleanup_failure_after_publication_does_not_fail_the_write(
     assert (tmp_path / "report.csv").read_bytes() == b"payload"
 
 
+def test_failure_to_inspect_an_opened_file_is_an_io_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "data.csv").write_text("a\n")
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open, real_close = os.open, os.close
+
+    def tracking_open(path: object, *args: object, **kwargs: object) -> int:
+        descriptor = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        opened.append(descriptor)
+        return descriptor
+
+    def tracking_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    def broken_fstat(descriptor: int) -> os.stat_result:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "close", tracking_close)
+    monkeypatch.setattr(os, "fstat", broken_fstat)
+    assert _code(lambda: _read(LocalConnector(tmp_path), "data.csv")) == ErrorCode.LOCAL_IO_ERROR
+    assert opened and closed == opened
+
+
+def test_failed_close_of_the_stage_is_reported_and_closes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage_descriptors: list[int] = []
+    closes: list[int] = []
+    real_open, real_close = os.open, os.close
+
+    def tracking_open(path: object, *args: object, **kwargs: object) -> int:
+        descriptor = real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+        if Path(str(path)).name.startswith(".databridge-"):
+            stage_descriptors.append(descriptor)
+        return descriptor
+
+    def failing_close(descriptor: int) -> None:
+        closes.append(descriptor)
+        real_close(descriptor)
+        if descriptor in stage_descriptors:
+            raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(os, "open", tracking_open)
+    monkeypatch.setattr(os, "close", failing_close)
+    code = _code(lambda: _write(LocalConnector(tmp_path), "report.csv", b"payload"))
+    assert code == ErrorCode.DESTINATION_WRITE_FAILED
+    assert [closes.count(descriptor) for descriptor in stage_descriptors] == [1]
+    assert not (tmp_path / "report.csv").exists()
+
+
 def test_cleanup_failure_is_logged_on_one_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

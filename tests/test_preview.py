@@ -40,8 +40,8 @@ class _TrickleConnector:
         return AccessCheck(writable=False)
 
     @contextmanager
-    def read(self, filename: str) -> Iterator[_Trickle]:
-        yield _Trickle(self.files[filename])
+    def read(self, filename: str, limit: int | None = None) -> Iterator[_Trickle]:
+        yield _Trickle(self.files[filename][:limit])
 
     @contextmanager
     def write(self, filename: str, staging_id: str, overwrite: bool) -> Iterator[Any]:
@@ -137,6 +137,28 @@ def test_hostile_json_is_rejected_with_a_preview_error(
         document = document[:-1] + ',{"pad":"' + "p" * MAX_PREVIEW_BYTES + '"}]'
     (tmp_path / "hostile.json").write_text(document)
     response = _head(settings, tmp_path, "hostile.json", limit=1)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == code
+
+
+PAD = "p" * MAX_PREVIEW_BYTES
+
+
+@pytest.mark.parametrize(
+    ("document", "code"),
+    [
+        ('[{"a": tru}, {"pad": "' + PAD + '"}]', "MALFORMED_FILE"),
+        ('[{"a": 1} {"b": 2}, {"pad": "' + PAD + '"}]', "MALFORMED_FILE"),
+        ('[{"a": "\\q"}, {"pad": "' + PAD + '"}]', "MALFORMED_FILE"),
+        ('[{"pad": "' + PAD + '"}]', "PREVIEW_LIMIT_EXCEEDED"),
+    ],
+    ids=["bad-literal", "missing-comma", "bad-escape", "string-cut-by-budget"],
+)
+def test_json_past_the_budget_tells_errors_from_truncation(
+    settings: Settings, tmp_path: Path, document: str, code: str
+) -> None:
+    (tmp_path / "large.json").write_text(document)
+    response = _head(settings, tmp_path, "large.json", limit=2)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == code
 

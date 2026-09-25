@@ -21,6 +21,8 @@ Status is **planned**, **partial**, or **verified**. Each row points to a test o
 
 Passing local tests alone does not establish the Docker or live HTTP path. The integration suite and smoke command cover those separately. Benchmark measurements apply to the stated machine and fixture.
 
+A second, independent review of the fix branch found 5 medium and 10 low defects in the fixes themselves; each now has a test that failed first: a directory that never ends (`test_a_directory_that_never_ends_is_bounded`), a file replaced between STAT and OPEN (`test_read_uses_the_size_of_the_file_it_opened`), a late write failure recorded as publication (`test_a_failed_tail_write_is_a_write_failure_not_a_publication`, `test_each_failure_records_its_phase_code_and_side`), sync and close deadlines (`test_sync_and_close_get_time_in_proportion_to_the_upload`), a body that is not UTF-8 (`test_body_that_is_not_utf8_is_a_request_error`), and the low items in `tests/test_env_file.py`, `tests/test_local_connector.py`, `tests/test_store.py`, `tests/test_preview.py`, `tests/test_connections.py`, and `tests/test_app.py`.
+
 ## Recorded gate runs
 
 | Date | Commit | `make check` | `make integration` | Live checks |

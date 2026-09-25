@@ -11,6 +11,7 @@ import struct
 import threading
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -44,7 +45,10 @@ class Scenario:
     hostile one: "count" claims 2**31-1 entries, "oversized" exceeds 256 KiB, and "extended"
     claims 2**31-1 extended attributes. `chatter_seconds` delays each READDIR reply while the
     server sends replies to requests that were never made. `trickle_readdir` answers READDIR
-    with an end-of-directory status sent one byte every 0.2 seconds.
+    with an end-of-directory status sent one byte every 0.2 seconds. `endless_readdir` never
+    ends a directory: "empty" pages hold no entries and "dots" pages hold only "." and "..".
+    `fsync_seconds` delays fsync@openssh.com, and `after_stat` runs with the path after each
+    STAT reply is prepared, before it is sent.
     """
 
     drop_before: str | None = None
@@ -62,6 +66,9 @@ class Scenario:
     malformed_names: str | None = None
     chatter_seconds: float = 0.0
     trickle_readdir: bool = False
+    endless_readdir: str | None = None
+    fsync_seconds: float = 0.0
+    after_stat: Callable[[str], None] | None = None
     calls: Counter[str] = field(default_factory=Counter)
     pipelined: Counter[str] = field(default_factory=Counter)
 
@@ -140,7 +147,10 @@ class _Interface(SFTPServerInterface):
 
     def stat(self, path: str) -> SFTPAttributes | int:
         self.begin("stat")
-        return self._attributes(path, follow=True)
+        attributes = self._attributes(path, follow=True)
+        if self.scenario.after_stat is not None:
+            self.scenario.after_stat(path)
+        return attributes
 
     def lstat(self, path: str) -> SFTPAttributes | int:
         self.begin("lstat")
@@ -232,8 +242,18 @@ class _Handle(SFTPHandle):
             return SFTP_FAILURE
         return super().write(offset, data)
 
+    def stat(self) -> SFTPAttributes | int:
+        """FSTAT: the attributes of the open file, whatever its path names now."""
+        self.interface.begin("fstat")
+        self.readfile.flush()
+        attributes = SFTPAttributes.from_stat(os.fstat(self.readfile.fileno()))
+        if self.interface.scenario.omit_sizes:
+            attributes.st_size = None
+        return attributes
+
     def fsync(self) -> None:
         self.interface.begin("fsync")
+        time.sleep(self.interface.scenario.fsync_seconds)
         self.writefile.flush()
         os.fsync(self.writefile.fileno())
 
@@ -263,6 +283,19 @@ class _Server(SFTPServer):
 
     def _read_folder(self, request_number: int, folder: SFTPHandle) -> None:
         self.server.begin("readdir")
+        endless = self.server.scenario.endless_readdir
+        if endless is not None:
+            page = Message()
+            page.add_int(request_number)
+            dots = [".", ".."] if endless == "dots" else []
+            page.add_int(len(dots))
+            for name in dots:
+                page.add_string(name)
+                page.add_string("")
+                page.add_int(SFTPAttributes.FLAG_PERMISSIONS)
+                page.add_int(0o040755)
+            self._send_packet(CMD_NAME, page)
+            return
         if self.server.scenario.trickle_readdir:
             reply = Message()
             reply.add_int(request_number)

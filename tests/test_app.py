@@ -138,6 +138,38 @@ def test_malformed_json_is_reported_as_such(settings: Settings) -> None:
     ]
 
 
+@pytest.mark.parametrize("path", ["/connections", "/transfers"])
+def test_body_that_is_not_utf8_is_a_request_error(settings: Settings, path: str) -> None:
+    with client_for(settings) as client:
+        response = client.post(
+            path, content=b"[\xff\xfe]", headers={"Content-Type": "application/json"}
+        )
+
+    assert response.status_code == 422
+    assert response.headers["X-Request-ID"]
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.json()["error"]["details"] == [
+        {"field": "request body", "problem": "is not valid JSON"}
+    ]
+
+
+def test_transfer_request_rejects_unknown_fields(settings: Settings) -> None:
+    body = {
+        "source": "a",
+        "source_file": "in.bin",
+        "destination": "b",
+        "destination_file": "out.bin",
+        "overwite": True,
+    }
+    with client_for(settings) as client:
+        response = client.post("/transfers", json=body)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"] == [
+        {"field": "overwite", "problem": "is not a recognized field"}
+    ]
+
+
 def test_request_log_records_error_params_without_secrets(
     settings: Settings, tmp_path: Path
 ) -> None:
@@ -225,6 +257,12 @@ def test_openapi_documents_reachable_statuses_and_error_codes(settings: Settings
     created = transfer_post["responses"]["201"]["content"]["application/json"]
     assert created["schema"]["$ref"] == "#/components/schemas/TransferRecord"
     assert created["example"]["status"] == "completed"
+    preview_responses = document["paths"]["/connections/{name}/files/{filename}/head"]["get"][
+        "responses"
+    ]
+    assert "CONNECTION_ROOT_UNAVAILABLE" in preview_responses["503"]["description"]
+    files_responses = document["paths"]["/connections/{name}/files"]["get"]["responses"]
+    assert "INVALID_CONNECTION_SETTINGS" in files_responses["400"]["description"]
     record = schemas["TransferRecord"]["properties"]
     for timestamp in ("started_at", "updated_at"):
         assert record[timestamp]["format"] == "date-time"

@@ -9,6 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 from support import client_for
 
+from databridge import store as store_module
 from databridge.config import Settings
 from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import LocalConnection, TransferRequest
@@ -141,9 +142,10 @@ def test_transfer_state_changes_follow_the_state_machine(settings: Settings) -> 
 def test_failed_transfer_records_phase_code_and_message(settings: Settings) -> None:
     store = _store(settings)
     store.start_transfer(FIRST, _request())
-    failed = store.fail_transfer(
+    store.fail_transfer(
         FIRST, 2, "destination_write", ErrorCode.DESTINATION_NOT_WRITABLE, "read-only root"
     )
+    failed = store.get_transfer(FIRST)
     assert (failed.status, failed.bytes_copied, failed.failure_phase) == (
         "failed",
         2,
@@ -152,6 +154,25 @@ def test_failed_transfer_records_phase_code_and_message(settings: Settings) -> N
     assert failed.error_code == ErrorCode.DESTINATION_NOT_WRITABLE
     assert failed.error == "read-only root"
     assert failed.completed_at is None and failed.failed_at == failed.updated_at
+
+
+def test_completion_that_cannot_be_read_back_is_rolled_back(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(settings)
+    store.start_transfer(FIRST, _request())
+    store.mark_publishing(FIRST, 3)
+
+    def unreadable(_row: object) -> None:
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store_module.TransferRecord, "model_validate", unreadable)
+        with pytest.raises(DataBridgeError) as failure:
+            store.finish_transfer(FIRST)
+
+    assert failure.value.code == ErrorCode.TRANSFER_RECORD_FAILED
+    assert store.get_transfer(FIRST).status == "publishing"
 
 
 def test_transfer_record_write_failure_is_a_typed_error(settings: Settings) -> None:
