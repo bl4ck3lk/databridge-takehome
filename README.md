@@ -124,7 +124,7 @@ only that protocol; a third test connector exercises the same copy logic. The
 SQLite and encrypts SFTP passwords with a stable external Fernet key. The API
 uses typed request/response models and maps safe domain errors to HTTP status.
 
-Writes stage under `.{destination}.databridge-{transfer-id}.part` and publish
+Writes stage under `.databridge-{transfer-id}.part` and publish
 only on success. A handled failure removes its stage and leaves the existing
 destination unchanged. After a process crash, startup marks a `running` record
 `failed`, but an unpublished stage may remain. Inspect the failed transfer ID

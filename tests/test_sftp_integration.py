@@ -6,10 +6,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from support import client_for
+from support import client_for, read_all
 
 from databridge.config import Settings
-from databridge.connectors import sftp as sftp_module
+from databridge.connectors import base
 from databridge.connectors.base import CHUNK_SIZE
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
@@ -61,7 +61,7 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
                 destination.write(bytes(range(256)) * 16)
                 assert filename not in connector.list_files().files
             with connector.read(filename) as source:
-                assert source.read() == bytes(range(256)) * 16
+                assert read_all(source) == bytes(range(256)) * 16
             assert filename in connector.list_files().files
 
             with pytest.raises(DataBridgeError) as missing:
@@ -77,14 +77,14 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
             with connector.write(filename, str(uuid4()), overwrite=True) as destination:
                 destination.write(b"replacement")
             with connector.read(filename) as source:
-                assert source.read() == b"replacement"
+                assert read_all(source) == b"replacement"
             with pytest.raises(ValueError, match="injected failure"):
                 with connector.write(filename, str(uuid4()), overwrite=True) as destination:
                     destination.write(b"partial")
                     raise ValueError("injected failure")
             with connector.read(filename) as source:
-                assert source.read() == b"replacement"
-            assert not any((PROJECT_ROOT / "sftp_data").glob(f".{filename}.databridge-*.part"))
+                assert read_all(source) == b"replacement"
+            assert not any((PROJECT_ROOT / "sftp_data").glob(".databridge-*.part"))
         with client_for(trusted_settings) as restarted:
             assert restarted.get("/connections/remote_server/files").status_code == 200
     finally:
@@ -105,7 +105,7 @@ def test_sftp_publish_time_collision_preserves_existing_file(trusted_settings: S
                     host_file.write_bytes(b"winner")
             assert collision.value.code == "DESTINATION_EXISTS"
             assert host_file.read_bytes() == b"winner"
-            assert not any((PROJECT_ROOT / "sftp_data").glob(f".{filename}.databridge-*.part"))
+            assert not any((PROJECT_ROOT / "sftp_data").glob(".databridge-*.part"))
     finally:
         host_file.unlink(missing_ok=True)
 
@@ -268,7 +268,7 @@ def test_interrupted_transfer_stage_stays_hidden_after_restart(
 ) -> None:
     transfer_id = str(uuid4())
     destination_name = f"interrupted-{uuid4().hex}.bin"
-    stage_name = f".{destination_name}.databridge-{transfer_id}.part"
+    stage_name = f".databridge-{transfer_id}.part"
     stage_file = PROJECT_ROOT / "sftp_data" / stage_name
     try:
         with client_for(trusted_settings) as client:
@@ -304,11 +304,11 @@ def test_sftp_listing_reports_result_and_scan_caps(
             file.write_bytes(b"x")
         with client_for(trusted_settings) as client:
             client.post("/connections", json=_request("remote"))
-            monkeypatch.setattr(sftp_module, "MAX_LIST_RESULTS", 2)
+            monkeypatch.setattr(base, "MAX_LIST_RESULTS", 2)
             result_cap = client.get("/connections/remote/files").json()
             assert result_cap["truncated"] is True
             assert len(result_cap["files"]) == 2
-            monkeypatch.setattr(sftp_module, "MAX_LIST_SCAN", 1)
+            monkeypatch.setattr(base, "MAX_LIST_SCAN", 1)
             scan_cap = client.get("/connections/remote/files").json()
             assert scan_cap["truncated"] is True
             assert len(scan_cap["files"]) <= 1

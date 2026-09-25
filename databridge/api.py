@@ -3,7 +3,6 @@
 import json
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Query, Request, status
@@ -13,7 +12,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from databridge.config import Settings
-from databridge.connectors import connector_for
+from databridge.connectors import open_connector, prepare_connection
+from databridge.connectors.base import ConnectorContext
 from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import (
     CONNECTION_TYPE_NAMES,
@@ -23,7 +23,6 @@ from databridge.models import (
     FieldProblem,
     FileList,
     HealthcheckResult,
-    LocalConnection,
     PreviewResult,
     TransferRecord,
     TransferRequest,
@@ -130,6 +129,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request_log.open()
             application.state.store = store
             application.state.settings = effective
+            application.state.connector_context = ConnectorContext(
+                known_hosts_path=effective.known_hosts_path
+            )
             application.state.request_log = request_log
             try:
                 yield
@@ -217,25 +219,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.body_params = body_log_fields(
             item.model_dump(exclude={"password"}), "/connections"
         )
-        if isinstance(item, LocalConnection):
-            try:
-                requested_path = Path(item.path).expanduser()
-                requested_path.mkdir(parents=True, exist_ok=True)
-                path = requested_path.resolve(strict=True)
-            except FileExistsError as exc:
-                raise DataBridgeError(
-                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Local path is not a directory"
-                ) from exc
-            except (OSError, RuntimeError) as exc:
-                raise DataBridgeError(
-                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Cannot create local directory"
-                ) from exc
-            if not path.is_dir():
-                raise DataBridgeError(
-                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Local path is not a directory"
-                )
-            item = item.model_copy(update={"path": str(path)})
-        return request.app.state.store.create(item)
+        return request.app.state.store.create(prepare_connection(item))
 
     @application.get(
         "/connections", response_model=list[ConnectionView], responses=_error_responses()
@@ -263,8 +247,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses=_error_responses(*listing_errors),
     )
     def list_files(name: str, request: Request) -> FileList:
-        item = request.app.state.store.get(name)
-        connector = connector_for(item, request.app.state.settings.known_hosts_path)
+        connector = open_connector(
+            request.app.state.store.get(name), request.app.state.connector_context
+        )
         listing = connector.list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
 
@@ -274,8 +259,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses=_error_responses(*listing_errors, changes_state=True),
     )
     def healthcheck(name: str, request: Request) -> HealthcheckResult:
-        item = request.app.state.store.get(name)
-        connector = connector_for(item, request.app.state.settings.known_hosts_path)
+        connector = open_connector(
+            request.app.state.store.get(name), request.app.state.connector_context
+        )
         connector.list_files()
         return HealthcheckResult(connection=name, reachable=True)
 
@@ -290,6 +276,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ErrorCode.UNSUPPORTED_PREVIEW_FORMAT,
             ErrorCode.MALFORMED_FILE,
             ErrorCode.PREVIEW_LIMIT_EXCEEDED,
+            ErrorCode.FILE_NOT_READABLE,
             ErrorCode.LOCAL_IO_ERROR,
             *_SFTP_ACCESS,
         ),
@@ -297,8 +284,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def preview_file(
         name: str, filename: str, request: Request, limit: int = Query(default=5, ge=1, le=100)
     ) -> PreviewResult:
-        item = request.app.state.store.get(name)
-        connector = connector_for(item, request.app.state.settings.known_hosts_path)
+        connector = open_connector(
+            request.app.state.store.get(name), request.app.state.connector_context
+        )
         return preview(connector, filename, limit)
 
     @application.post(
@@ -313,6 +301,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ErrorCode.CONNECTION_NOT_FOUND,
                 ErrorCode.FILE_NOT_FOUND,
                 ErrorCode.DESTINATION_EXISTS,
+                ErrorCode.DESTINATION_NOT_WRITABLE,
+                ErrorCode.FILE_NOT_READABLE,
+                ErrorCode.PUBLISH_UNSUPPORTED,
+                ErrorCode.DESTINATION_FULL,
                 ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
                 ErrorCode.LOCAL_IO_ERROR,
                 ErrorCode.SOURCE_READ_FAILED,
@@ -381,9 +373,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.body_params = body_log_fields(item.model_dump(), "/transfers")
         service = TransferService(
             request.app.state.store,
-            lambda connection: connector_for(
-                connection, request.app.state.settings.known_hosts_path
-            ),
+            lambda connection: open_connector(connection, request.app.state.connector_context),
         )
         record = service.run(item)
         request.state.transfer_id = record.id

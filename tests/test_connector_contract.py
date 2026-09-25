@@ -4,6 +4,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from support import read_all
 
 from databridge.connectors.base import CHUNK_SIZE
 from databridge.connectors.local import LocalConnector
@@ -41,7 +42,7 @@ def test_connector_contract_at_chunk_boundaries(backend: str, size: int, tmp_pat
         with connector.write(filename, str(uuid4()), overwrite=False) as writer:
             writer.write(payload)
         with connector.read(filename) as reader:
-            assert reader.read() == payload
+            assert read_all(reader) == payload
         assert filename in connector.list_files().files
 
         with pytest.raises(DataBridgeError) as collision:
@@ -56,8 +57,8 @@ def test_connector_contract_at_chunk_boundaries(backend: str, size: int, tmp_pat
                 writer.write(b"x" * CHUNK_SIZE)
                 raise ValueError("injected failure")
         with connector.read(filename) as reader:
-            assert reader.read() == b"replacement"
-        assert not list(host_file.parent.glob(f".{filename}.databridge-*.part"))
+            assert read_all(reader) == b"replacement"
+        assert not list(host_file.parent.glob(".databridge-*.part"))
 
         with pytest.raises(DataBridgeError) as escape:
             with connector.read("../outside.bin"):

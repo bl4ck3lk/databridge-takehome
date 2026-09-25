@@ -25,10 +25,10 @@ EXPECTED_STATUSES = {
         {"200", "404", "502", "503"} | GLOBAL_STATUSES | UNSAFE_STATUSES
     ),
     ("get", "/connections/{name}/files/{filename}/head"): (
-        {"200", "404", "422", "502", "503"} | GLOBAL_STATUSES
+        {"200", "404", "409", "422", "502", "503"} | GLOBAL_STATUSES
     ),
     ("post", "/transfers"): (
-        {"201", "404", "409", "422", "502", "503"} | GLOBAL_STATUSES | UNSAFE_STATUSES
+        {"201", "404", "409", "422", "502", "503", "507"} | GLOBAL_STATUSES | UNSAFE_STATUSES
     ),
     ("get", "/transfers/{transfer_id}"): {"200", "404"} | GLOBAL_STATUSES,
 }

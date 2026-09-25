@@ -4,11 +4,11 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
-from support import client_for
+from support import client_for, read_all
 
 from databridge.api import create_app
 from databridge.config import Settings
-from databridge.connectors import local
+from databridge.connectors import base
 from databridge.connectors.local import LocalConnector
 from databridge.errors import DataBridgeError
 
@@ -143,7 +143,7 @@ def test_local_write_is_staged_and_preserves_destination_on_failure(tmp_path: Pa
         destination.write(b"original")
     assert (tmp_path / "file.bin").read_bytes() == b"original"
     with connector.read("file.bin") as source:
-        assert source.read() == b"original"
+        assert read_all(source) == b"original"
 
     with pytest.raises(DataBridgeError) as collision:
         with connector.write("file.bin", transfer_id, overwrite=False):
@@ -166,7 +166,7 @@ def test_local_connector_rejects_path_escape_and_reserved_stage_name(tmp_path: P
     for name in (
         "../outside.bin",
         "escape.bin",
-        ".x.databridge-00000000-0000-0000-0000-000000000001.part",
+        ".databridge-00000000-0000-0000-0000-000000000001.part",
     ):
         with pytest.raises(DataBridgeError) as error:
             with connector.read(name):
@@ -188,7 +188,7 @@ def test_local_listing_reports_result_and_scan_caps(
     assert len(listing.files) == 1_000
     assert listing.truncated is True
 
-    monkeypatch.setattr(local, "MAX_LIST_SCAN", 2)
+    monkeypatch.setattr(base, "MAX_LIST_SCAN", 2)
     listing = connector.list_files()
     assert listing.truncated is True
     assert len(listing.files) <= 2

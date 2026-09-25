@@ -7,18 +7,21 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, Iterator
+from uuid import uuid4
 
 import paramiko
 
 from databridge.connectors.base import (
-    MAX_LIST_RESULTS,
-    MAX_LIST_SCAN,
+    AccessCheck,
+    ConnectorContext,
     Listing,
-    is_stage_name,
+    bounded_listing,
+    probe_name,
+    stage_name,
     validate_filename,
 )
 from databridge.errors import DataBridgeError, ErrorCode
-from databridge.models import SFTPConnection
+from databridge.models import Connection, SFTPConnection
 
 
 class _RejectUnknownHost(paramiko.MissingHostKeyPolicy):
@@ -33,6 +36,35 @@ class SFTPConnector:
         self.connection = connection
         self.known_hosts_path = known_hosts_path
         self.root = connection.root
+
+    @classmethod
+    def open(cls, connection: Connection, context: ConnectorContext) -> "SFTPConnector":
+        if not isinstance(connection, SFTPConnection):
+            raise TypeError("SFTPConnector requires an SFTP connection")
+        return cls(connection, context.known_hosts_path)
+
+    @staticmethod
+    def prepare(connection: Connection) -> Connection:
+        """SFTP settings are validated by the model; live access is checked by the healthcheck."""
+        return connection
+
+    def check_access(self) -> AccessCheck:
+        self.list_files()
+        probe = posixpath.join(self.root, probe_name(str(uuid4())))
+        with self._session() as sftp:
+            try:
+                sftp.open(probe, "wbx").close()
+            except OSError as exc:
+                if exc.errno == errno.EACCES:
+                    return AccessCheck(writable=False)
+                raise DataBridgeError(
+                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot test write access to the SFTP root"
+                ) from exc
+            try:
+                sftp.remove(probe)
+            except OSError:
+                pass  # A leftover probe uses the reserved prefix and never appears in listings.
+        return AccessCheck(writable=True)
 
     def _path(self, filename: str) -> str:
         validate_filename(filename)
@@ -91,28 +123,16 @@ class SFTPConnector:
             client.close()
 
     def list_files(self) -> Listing:
-        files: list[str] = []
-        scanned = 0
         with self._session() as sftp:
             try:
-                for entry in sftp.listdir_iter(self.root, read_aheads=1):
-                    scanned += 1
-                    if scanned > MAX_LIST_SCAN:
-                        return Listing(sorted(files), True)
-                    if is_stage_name(entry.filename) or not stat.S_ISREG(entry.st_mode or 0):
-                        continue
-                    try:
-                        validate_filename(entry.filename)
-                    except DataBridgeError:
-                        continue
-                    if len(files) >= MAX_LIST_RESULTS:
-                        return Listing(sorted(files), True)
-                    files.append(entry.filename)
+                return bounded_listing(
+                    (entry.filename, stat.S_ISREG(entry.st_mode or 0))
+                    for entry in sftp.listdir_iter(self.root, read_aheads=1)
+                )
             except OSError as exc:
                 raise DataBridgeError(
                     ErrorCode.CONNECTION_ROOT_UNAVAILABLE, "SFTP root directory cannot be listed"
                 ) from exc
-        return Listing(sorted(files), False)
 
     @contextmanager
     def read(self, filename: str) -> Iterator[BinaryIO]:
@@ -146,7 +166,7 @@ class SFTPConnector:
     @contextmanager
     def write(self, filename: str, transfer_id: str, overwrite: bool) -> Iterator[BinaryIO]:
         destination = self._path(filename)
-        stage = posixpath.join(self.root, f".{filename}.databridge-{transfer_id}.part")
+        stage = posixpath.join(self.root, stage_name(transfer_id))
         with self._session() as sftp:
             if not overwrite and self._exists(sftp, destination):
                 raise DataBridgeError(

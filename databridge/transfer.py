@@ -6,11 +6,11 @@ from uuid import uuid4
 
 from databridge.connectors.base import CHUNK_SIZE, Connector, validate_filename
 from databridge.errors import DataBridgeError, ErrorCode
-from databridge.models import LocalConnection, SFTPConnection, TransferRecord, TransferRequest
+from databridge.models import Connection, TransferRecord, TransferRequest
 from databridge.store import ConnectionStore
 
 logger = logging.getLogger(__name__)
-ConnectorFactory = Callable[[LocalConnection | SFTPConnection], Connector]
+ConnectorFactory = Callable[[Connection], Connector]
 
 
 class TransferService:
@@ -49,12 +49,7 @@ class TransferService:
                         if not chunk:
                             break
                         phase = "destination_write"
-                        written = writer.write(chunk)
-                        if written is not None and written != len(chunk):
-                            raise DataBridgeError(
-                                ErrorCode.DESTINATION_WRITE_FAILED,
-                                "Destination accepted a partial chunk",
-                            )
+                        writer.write(chunk)
                         copied += len(chunk)
                     phase = "finalization"
             return self.store.finish_transfer(transfer_id, copied)
