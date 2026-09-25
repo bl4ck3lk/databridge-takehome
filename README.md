@@ -19,7 +19,9 @@ This installs dependencies, adds missing settings to `.env` (it never replaces
 one), starts the SFTP fixture, trusts its host key if none is saved, runs the
 checks, and starts the API. It takes longer on the first run because it
 downloads dependencies and the SFTP image. Stop the API with Ctrl-C. Later,
-`make run` starts only the API.
+`make run` starts only the API. Quickstart writes each `.env` value in single
+quotes and stops on a double-quoted one, which Docker Compose and uv would read
+with escape rules that quickstart does not apply.
 
 | `.env` setting | Written by quickstart as |
 | --- | --- |

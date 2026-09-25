@@ -15,7 +15,7 @@ prepare_fixture_data() {
     fixture_uid="$fixture_host_uid"
   fi
   ensure_env "$1" DATABRIDGE_SFTP_UID "$fixture_uid" || return 1
-  fixture_uid="$(read_env "$1" DATABRIDGE_SFTP_UID)"
+  fixture_uid="$(read_env "$1" DATABRIDGE_SFTP_UID)" || return 1
   if [ "$fixture_uid" = 0 ]; then
     echo "DATABRIDGE_SFTP_UID in $1 is 0, but the fixture's sshd refuses UID 0 logins; remove that line and rerun" >&2
     return 1

@@ -22,10 +22,13 @@ ensure_env .env DATABRIDGE_SFTP_PORT 2222
 # One Compose project per checkout path, so checkouts never share a container or host keys.
 ensure_env .env COMPOSE_PROJECT_NAME "databridge-$(printf '%s' "$PWD" | cksum | cut -d ' ' -f 1)"
 
+# Read settings back before starting anything, so a value read_env refuses stops quickstart here.
+known_hosts="$(read_env .env DATABRIDGE_KNOWN_HOSTS)"
+sftp_port="$(read_env .env DATABRIDGE_SFTP_PORT)"
+
 prepare_fixture_data .env sftp_data
 docker compose up -d
-sh scripts/trust_sftp_fixture.sh \
-  "$(read_env .env DATABRIDGE_KNOWN_HOSTS)" "$(read_env .env DATABRIDGE_SFTP_PORT)"
+sh scripts/trust_sftp_fixture.sh "$known_hosts" "$sftp_port"
 
 make check
 make integration

@@ -55,6 +55,14 @@ def test_root_hands_the_data_directory_to_a_stored_uid(tmp_path: Path) -> None:
     assert (tmp_path / "chown-calls").read_text() == "501 sftp_data\n"
 
 
+def test_a_double_quoted_stored_uid_stops_before_the_data_directory(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text('DATABRIDGE_SFTP_UID="501"\n')
+    result = _prepare(tmp_path, 501)
+    assert result.returncode != 0
+    assert "DATABRIDGE_SFTP_UID='value'" in result.stderr
+    assert not (tmp_path / "sftp_data").exists()
+
+
 def test_a_stored_uid_of_zero_is_refused(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text("DATABRIDGE_SFTP_UID='0'\n")
     result = _prepare(tmp_path, 501)

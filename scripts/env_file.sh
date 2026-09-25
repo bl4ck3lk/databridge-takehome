@@ -15,7 +15,16 @@ ensure_env() {
   fi
 }
 
-# read_env FILE KEY: print the last value of KEY, without its single or double quotes.
+# read_env FILE KEY: print the last value of KEY without its single quotes. A double-quoted value
+# is refused: Docker Compose and uv apply escape and interpolation rules inside double quotes,
+# which this reader does not, so it would read a different value than they do.
 read_env() {
-  sed -n "s/^$2=//p" "$1" | tail -n 1 | sed -e "s/^'\(.*\)'\$/\1/" -e 's/^"\(.*\)"$/\1/'
+  env_value="$(sed -n "s/^$2=//p" "$1" | tail -n 1)"
+  case "$env_value" in
+    \"*)
+      echo "$2 in $1 is double-quoted; write it as $2='value'" >&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$env_value" | sed -e "s/^'\(.*\)'\$/\1/"
 }

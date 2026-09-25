@@ -41,8 +41,16 @@ def test_a_value_with_a_single_quote_is_refused(tmp_path: Path) -> None:
     assert (tmp_path / ".env").read_text() == ""
 
 
-def test_double_quoted_values_from_earlier_versions_are_read(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text("KEY=\"/old/path\"\nOTHER='x'\n")
+def test_an_unquoted_value_is_read_as_written(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("KEY=plain-value\n")
     result = _shell(tmp_path, "read_env .env KEY")
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "/old/path\n"
+    assert result.stdout == "plain-value\n"
+
+
+def test_a_double_quoted_value_is_refused(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("KEY=\"/path\"\nOTHER='x'\n")
+    result = _shell(tmp_path, "read_env .env KEY")
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "KEY='value'" in result.stderr
