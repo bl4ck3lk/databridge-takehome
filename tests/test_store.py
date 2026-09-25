@@ -3,6 +3,7 @@
 import os
 import sqlite3
 import stat
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -178,12 +179,15 @@ def test_completion_that_cannot_be_read_back_is_rolled_back(
 def test_transfer_record_write_failure_is_a_typed_error(settings: Settings) -> None:
     store = _store(settings)
     store.start_transfer(FIRST, _request())
-    settings.database_path.chmod(0o400)
-    try:
-        with pytest.raises(DataBridgeError) as failure:
-            store.record_progress(FIRST, 1)
-    finally:
-        settings.database_path.chmod(0o600)
+    # A trigger refuses the write for every user; file permissions do not bind root.
+    with closing(sqlite3.connect(settings.database_path)) as database:
+        database.execute(
+            "CREATE TRIGGER refuse_update BEFORE UPDATE ON transfers "
+            "BEGIN SELECT RAISE(ABORT, 'refused'); END"
+        )
+        database.commit()
+    with pytest.raises(DataBridgeError) as failure:
+        store.record_progress(FIRST, 1)
     assert failure.value.code == ErrorCode.TRANSFER_RECORD_FAILED
     assert failure.value.transfer_id == FIRST
 

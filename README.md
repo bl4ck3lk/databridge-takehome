@@ -26,7 +26,7 @@ downloads dependencies and the SFTP image. Stop the API with Ctrl-C. Later,
 | `DATABRIDGE_ENCRYPTION_KEY` | A new Fernet key; required at startup, never stored in SQLite |
 | `DATABRIDGE_DB_PATH`, `DATABRIDGE_KNOWN_HOSTS` | Absolute paths to `state/databridge.sqlite3` and `known_hosts` |
 | `DATABRIDGE_SFTP_PORT` | `2222`, the fixture's host port |
-| `DATABRIDGE_SFTP_UID` | Your UID, so the fixture can write the bind-mounted `sftp_data/` on Linux |
+| `DATABRIDGE_SFTP_UID` | Your UID, so the fixture can write the bind-mounted `sftp_data/` on Linux. As root, `1001`, because the fixture refuses UID 0 logins; quickstart then gives `sftp_data/` to that UID |
 | `COMPOSE_PROJECT_NAME` | A name derived from the checkout path, so two checkouts never share a fixture |
 
 `DATABRIDGE_ALLOWED_HOSTS` (comma-separated) replaces the accepted `Host` names

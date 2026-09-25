@@ -6,7 +6,8 @@ services:
     platform: linux/amd64
     ports:
       - "127.0.0.1:${DATABRIDGE_SFTP_PORT:-2222}:22"
-    # The container user takes the host user's UID so the bind-mounted sftp_data is writable.
+    # The container user takes the UID quickstart stores: the host user's, so the bind-mounted
+    # sftp_data is writable, or 1001 on a root host, because sshd refuses UID 0 logins.
     command: testuser:testpass:${DATABRIDGE_SFTP_UID:-1001}
     volumes:
       - ./sftp_data:/home/testuser/data
