@@ -19,8 +19,10 @@ from databridge.models import (
     CONNECTION_MODELS,
     Connection,
     ConnectionView,
+    FailurePhase,
     TransferRecord,
     TransferRequest,
+    TransferStatus,
 )
 
 SCHEMA_VERSION = "1"
@@ -39,15 +41,28 @@ _SCHEMA = (
         source_file TEXT NOT NULL,
         destination TEXT NOT NULL,
         destination_file TEXT NOT NULL,
-        status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+        overwrite INTEGER NOT NULL CHECK (overwrite IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('running', 'publishing', 'completed', 'failed')),
         started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
         completed_at TEXT,
         failed_at TEXT,
-        bytes_copied INTEGER NOT NULL DEFAULT 0,
+        bytes_copied INTEGER NOT NULL CHECK (bytes_copied >= 0),
         failure_phase TEXT,
+        error_code TEXT,
         error TEXT
     )""",
+    "CREATE INDEX transfers_by_start ON transfers (started_at)",
 )
+_INTERRUPTED = {
+    "copying": (
+        "The service stopped before the transfer finished; the destination is unchanged, "
+        "but its staging file may remain"
+    ),
+    "publishing": (
+        "The service stopped while publishing; the destination may already contain the new file"
+    ),
+}
 
 
 def _now() -> str:
@@ -149,10 +164,11 @@ class ConnectionStore:
                 )
             connection.execute(
                 """UPDATE transfers
-                SET status = 'failed', failed_at = ?, failure_phase = 'interruption',
-                    error = 'Service stopped before transfer completed'
-                WHERE status = 'running'""",
-                (_now(),),
+                SET status = 'failed', updated_at = :now, failed_at = :now,
+                    failure_phase = 'interruption', error_code = :code,
+                    error = CASE status WHEN 'publishing' THEN :publishing ELSE :copying END
+                WHERE status IN ('running', 'publishing')""",
+                {"now": _now(), "code": ErrorCode.TRANSFER_INTERRUPTED.value, **_INTERRUPTED},
             )
 
     def _verify_existing(self, connection: sqlite3.Connection, tables: set[str]) -> None:
@@ -247,55 +263,95 @@ class ConnectionStore:
         return view_model.model_validate({"name": name, "type": kind, **settings})
 
     def start_transfer(self, transfer_id: str, request: TransferRequest) -> TransferRecord:
-        with self._connect() as connection:
+        now = _now()
+        with self._recording(transfer_id) as connection:
             connection.execute(
                 """INSERT INTO transfers (
-                    id, source, source_file, destination, destination_file,
-                    status, started_at, bytes_copied
-                ) VALUES (?, ?, ?, ?, ?, 'running', ?, 0)""",
+                    id, source, source_file, destination, destination_file, overwrite,
+                    status, started_at, updated_at, bytes_copied
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 0)""",
                 (
                     transfer_id,
                     request.source,
                     request.source_file,
                     request.destination,
                     request.destination_file,
-                    _now(),
+                    int(request.overwrite),
+                    now,
+                    now,
                 ),
             )
         return self.get_transfer(transfer_id)
 
-    def finish_transfer(self, transfer_id: str, bytes_copied: int) -> TransferRecord:
+    def record_progress(self, transfer_id: str, bytes_copied: int) -> None:
         self._transition(
             transfer_id,
-            """UPDATE transfers SET status = 'completed', completed_at = ?, bytes_copied = ?
+            """UPDATE transfers SET bytes_copied = ?, updated_at = ?
             WHERE id = ? AND status = 'running'""",
-            (_now(), bytes_copied, transfer_id),
+            (bytes_copied, _now(), transfer_id),
+        )
+
+    def mark_publishing(self, transfer_id: str, bytes_copied: int) -> None:
+        self._transition(
+            transfer_id,
+            """UPDATE transfers SET status = 'publishing', bytes_copied = ?, updated_at = ?
+            WHERE id = ? AND status = 'running'""",
+            (bytes_copied, _now(), transfer_id),
+        )
+
+    def finish_transfer(self, transfer_id: str) -> TransferRecord:
+        now = _now()
+        self._transition(
+            transfer_id,
+            """UPDATE transfers SET status = 'completed', completed_at = ?, updated_at = ?
+            WHERE id = ? AND status = 'publishing'""",
+            (now, now, transfer_id),
         )
         return self.get_transfer(transfer_id)
 
     def fail_transfer(
-        self, transfer_id: str, bytes_copied: int, phase: str, message: str
+        self,
+        transfer_id: str,
+        bytes_copied: int,
+        phase: FailurePhase,
+        code: ErrorCode,
+        message: str,
     ) -> TransferRecord:
+        now = _now()
         self._transition(
             transfer_id,
-            """UPDATE transfers SET status = 'failed', failed_at = ?, bytes_copied = ?,
-                failure_phase = ?, error = ?
-            WHERE id = ? AND status = 'running'""",
-            (_now(), bytes_copied, phase, message, transfer_id),
+            """UPDATE transfers SET status = 'failed', failed_at = ?, updated_at = ?,
+                bytes_copied = ?, failure_phase = ?, error_code = ?, error = ?
+            WHERE id = ? AND status IN ('running', 'publishing')""",
+            (now, now, bytes_copied, phase, code.value, message, transfer_id),
         )
         return self.get_transfer(transfer_id)
 
     def _transition(self, transfer_id: str, statement: str, parameters: tuple[object, ...]) -> None:
-        """Apply a compare-and-set state change; a record that already left `running` is a
-        conflict, never a silent no-op."""
-        with self._connect() as connection:
+        """Apply a compare-and-set state change; a record in another state is a conflict, never
+        a silent no-op."""
+        with self._recording(transfer_id) as connection:
             changed = connection.execute(statement, parameters).rowcount
         if changed != 1:
             raise DataBridgeError(
                 ErrorCode.TRANSFER_STATE_CONFLICT,
-                "The transfer record is no longer running; another operation already finalized it",
+                "The transfer record is not in the state this change requires; another "
+                "operation already changed it",
                 transfer_id,
             )
+
+    @contextmanager
+    def _recording(self, transfer_id: str) -> Iterator[sqlite3.Connection]:
+        """Write a transfer record; a database failure becomes a typed, attributable error."""
+        try:
+            with self._connect() as connection:
+                yield connection
+        except sqlite3.Error as exc:
+            raise DataBridgeError(
+                ErrorCode.TRANSFER_RECORD_FAILED,
+                f"The transfer record could not be saved ({exc.sqlite_errorname})",
+                transfer_id,
+            ) from exc
 
     def get_transfer(self, transfer_id: str) -> TransferRecord:
         with self._connect() as connection:
@@ -305,3 +361,13 @@ class ConnectionStore:
         if row is None:
             raise DataBridgeError(ErrorCode.TRANSFER_NOT_FOUND, "Transfer not found")
         return TransferRecord.model_validate(dict(row))
+
+    def list_transfers(self, status: TransferStatus | None, limit: int) -> list[TransferRecord]:
+        """Return the newest transfers first, optionally only those in one status."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM transfers WHERE :status IS NULL OR status = :status
+                ORDER BY started_at DESC, rowid DESC LIMIT :limit""",
+                {"status": status, "limit": limit},
+            ).fetchall()
+        return [TransferRecord.model_validate(dict(row)) for row in rows]

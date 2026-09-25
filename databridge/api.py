@@ -9,6 +9,7 @@ from fastapi import Body, FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from databridge.config import Settings
@@ -26,6 +27,7 @@ from databridge.models import (
     PreviewResult,
     TransferRecord,
     TransferRequest,
+    TransferStatus,
 )
 from databridge.preview import preview
 from databridge.request_log import RequestLog
@@ -45,6 +47,7 @@ _ROUTING_ERRORS = {
     404: (ErrorCode.ROUTE_NOT_FOUND, "No route matches this path; see /docs for the API"),
     405: (ErrorCode.METHOD_NOT_ALLOWED, "This route does not accept the request method"),
 }
+TRANSFER_PAGE_LIMIT = 500
 _LOCATION_PREFIXES = ("body", "query", "path")
 _REQUIREMENT_PREFIXES = ("Input should", "String should", "Value should")
 
@@ -94,8 +97,12 @@ def _field_problem(error: Mapping[str, Any]) -> FieldProblem:
     return FieldProblem(field=field, problem=_problem_text(str(error["msg"])))
 
 
-def _openapi_without_default_validation(application: FastAPI) -> Callable[[], dict[str, Any]]:
-    """Publish only declared responses; FastAPI adds a 422 to every route with parameters."""
+def _published_openapi(application: FastAPI) -> Callable[[], dict[str, Any]]:
+    """Publish only declared responses, with their examples exactly as declared.
+
+    FastAPI adds a 422 to every route with parameters, and it drops null values from the whole
+    document, so an example would not show fields that the live response returns as null.
+    """
 
     def openapi() -> dict[str, Any]:
         if application.openapi_schema is None:
@@ -107,6 +114,17 @@ def _openapi_without_default_validation(application: FastAPI) -> Callable[[], di
                     responses = operation["responses"]
                     if "HTTPValidationError" in json.dumps(responses.get("422", {})):
                         del responses["422"]
+            for route in application.routes:
+                if not isinstance(route, APIRoute):
+                    continue
+                for method in route.methods:
+                    published = schema["paths"][route.path_format][method.lower()]["responses"]
+                    for status_code, declared in route.responses.items():
+                        for media_type, content in declared.get("content", {}).items():
+                            if "example" in content:
+                                published[str(status_code)]["content"][media_type]["example"] = (
+                                    content["example"]
+                                )
             component_schemas = schema.get("components", {}).get("schemas", {})
             component_schemas.pop("HTTPValidationError", None)
             component_schemas.pop("ValidationError", None)
@@ -127,10 +145,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             store.initialize()
             request_log = RequestLog(effective.request_log_path)
             request_log.open()
+            context = ConnectorContext(known_hosts_path=effective.known_hosts_path)
             application.state.store = store
             application.state.settings = effective
-            application.state.connector_context = ConnectorContext(
-                known_hosts_path=effective.known_hosts_path
+            application.state.connector_context = context
+            application.state.transfers = TransferService(
+                store, lambda connection: open_connector(connection, context)
             )
             application.state.request_log = request_log
             try:
@@ -145,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         strict_content_type=True,
     )
     application.add_middleware(RequestContextMiddleware)
-    application.openapi = _openapi_without_default_validation(application)  # type: ignore[method-assign]
+    application.openapi = _published_openapi(application)  # type: ignore[method-assign]
 
     @application.exception_handler(DataBridgeError)
     def domain_error(request: Request, exc: DataBridgeError) -> JSONResponse:
@@ -311,15 +331,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ErrorCode.SOURCE_READ_FAILED,
                 ErrorCode.SOURCE_CHANGED,
                 ErrorCode.DESTINATION_WRITE_FAILED,
+                ErrorCode.TRANSFER_CAPACITY_EXCEEDED,
                 ErrorCode.TRANSFER_INTERNAL_ERROR,
+                ErrorCode.TRANSFER_RECORD_FAILED,
+                ErrorCode.TRANSFER_STATE_CONFLICT,
                 *_SFTP_ACCESS,
                 changes_state=True,
             ),
             201: {
-                "description": (
-                    "Transfer completed. The full response also includes null "
-                    "failed_at, failure_phase, and error fields."
-                ),
+                "description": "Transfer completed; every byte is published at the destination",
                 "content": {
                     "application/json": {
                         "example": {
@@ -328,10 +348,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "source_file": "customers.csv",
                             "destination": "remote_server",
                             "destination_file": "customers.csv",
+                            "overwrite": False,
                             "status": "completed",
-                            "started_at": "2026-09-24T15:00:00+00:00",
-                            "completed_at": "2026-09-24T15:00:01+00:00",
+                            "started_at": "2026-09-24T15:00:00Z",
+                            "updated_at": "2026-09-24T15:00:01Z",
+                            "completed_at": "2026-09-24T15:00:01Z",
+                            "failed_at": None,
                             "bytes_copied": 1005,
+                            "failure_phase": None,
+                            "error_code": None,
+                            "error": None,
                         }
                     }
                 },
@@ -373,13 +399,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
     ) -> TransferRecord:
         request.state.body_params = body_log_fields(item.model_dump(), "/transfers")
-        service = TransferService(
-            request.app.state.store,
-            lambda connection: open_connector(connection, request.app.state.connector_context),
-        )
-        record = service.run(item)
+        record = request.app.state.transfers.run(item)
         request.state.transfer_id = record.id
         return record
+
+    @application.get(
+        "/transfers",
+        response_model=list[TransferRecord],
+        responses=_error_responses(ErrorCode.INVALID_REQUEST),
+    )
+    def list_transfers(
+        request: Request,
+        status_filter: Annotated[
+            TransferStatus | None,
+            Query(alias="status", description="Return only transfers in this status"),
+        ] = None,
+        limit: Annotated[
+            int, Query(ge=1, le=TRANSFER_PAGE_LIMIT, description="Newest transfers to return")
+        ] = 50,
+    ) -> list[TransferRecord]:
+        """List transfers newest first; a running transfer shows its latest progress."""
+        return request.app.state.store.list_transfers(status_filter, limit)
 
     @application.get(
         "/transfers/{transfer_id}",

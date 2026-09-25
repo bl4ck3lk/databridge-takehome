@@ -1,10 +1,10 @@
-"""The small public connection contract."""
+"""The public request, response, and record models."""
 
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, SecretStr, StringConstraints
+from pydantic import AwareDatetime, BaseModel, Field, SecretStr, StringConstraints
 
 from databridge.errors import ErrorCode
 
@@ -106,16 +106,45 @@ class TransferRequest(BaseModel):
     overwrite: bool = False
 
 
+TransferStatus = Literal["running", "publishing", "completed", "failed"]
+FailurePhase = Literal[
+    "source_lookup",
+    "destination_lookup",
+    "source_open",
+    "destination_open",
+    "source_read",
+    "destination_write",
+    "publication",
+    "interruption",
+]
+
+
 class TransferRecord(BaseModel):
     id: str
     source: str
     source_file: str
     destination: str
     destination_file: str
-    status: Literal["running", "completed", "failed"]
-    started_at: str
-    completed_at: str | None
-    failed_at: str | None
-    bytes_copied: int
-    failure_phase: str | None
+    overwrite: bool
+    status: TransferStatus = Field(
+        description=(
+            "running: copying to a staging file; publishing: every byte is staged and the "
+            "destination is being replaced; completed; failed"
+        )
+    )
+    started_at: AwareDatetime
+    updated_at: AwareDatetime = Field(
+        description="Last change, including progress checkpoints about once per second"
+    )
+    completed_at: AwareDatetime | None
+    failed_at: AwareDatetime | None
+    bytes_copied: int = Field(
+        ge=0,
+        description=(
+            "Bytes written to the staging file; after a failure, a nonzero count does not mean "
+            "the destination changed"
+        ),
+    )
+    failure_phase: FailurePhase | None
+    error_code: ErrorCode | None
     error: str | None

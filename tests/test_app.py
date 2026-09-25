@@ -30,6 +30,7 @@ EXPECTED_STATUSES = {
     ("post", "/transfers"): (
         {"201", "404", "409", "422", "502", "503", "507"} | GLOBAL_STATUSES | UNSAFE_STATUSES
     ),
+    ("get", "/transfers"): {"200", "422"} | GLOBAL_STATUSES,
     ("get", "/transfers/{transfer_id}"): {"200", "404"} | GLOBAL_STATUSES,
 }
 
@@ -220,6 +221,13 @@ def test_openapi_documents_reachable_statuses_and_error_codes(settings: Settings
     created = transfer_post["responses"]["201"]["content"]["application/json"]
     assert created["schema"]["$ref"] == "#/components/schemas/TransferRecord"
     assert created["example"]["status"] == "completed"
+    record = schemas["TransferRecord"]["properties"]
+    for timestamp in ("started_at", "updated_at"):
+        assert record[timestamp]["format"] == "date-time"
+    for timestamp in ("completed_at", "failed_at"):
+        assert {"type": "string", "format": "date-time"} in record[timestamp]["anyOf"]
+    assert set(record["status"]["enum"]) == {"running", "publishing", "completed", "failed"}
+    assert set(created["example"]) == set(record)
 
 
 @pytest.mark.parametrize(

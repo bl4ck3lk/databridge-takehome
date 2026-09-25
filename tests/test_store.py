@@ -16,6 +16,7 @@ from databridge.store import ConnectionStore, DatabaseOwnerLock
 
 FIRST = "00000000-0000-4000-8000-000000000001"
 SECOND = "00000000-0000-4000-8000-000000000002"
+THIRD = "00000000-0000-4000-8000-000000000003"
 
 
 def _store(settings: Settings) -> ConnectionStore:
@@ -77,35 +78,105 @@ def test_database_without_a_schema_version_is_refused(settings: Settings) -> Non
         _store(settings)
 
 
-def test_startup_recovery_fails_only_running_transfers(settings: Settings) -> None:
+def _completed(store: ConnectionStore, transfer_id: str, size: int) -> None:
+    store.start_transfer(transfer_id, _request())
+    store.mark_publishing(transfer_id, size)
+    store.finish_transfer(transfer_id)
+
+
+def test_startup_recovery_fails_only_unfinished_transfers(settings: Settings) -> None:
     store = _store(settings)
-    store.start_transfer(FIRST, _request())
-    store.finish_transfer(FIRST, 7)
+    _completed(store, FIRST, 7)
     store.start_transfer(SECOND, _request())
+    store.record_progress(SECOND, 5)
+    store.start_transfer(THIRD, _request())
+    store.mark_publishing(THIRD, 9)
 
     restarted = _store(settings)
 
     completed = restarted.get_transfer(FIRST)
-    interrupted = restarted.get_transfer(SECOND)
+    copying = restarted.get_transfer(SECOND)
+    publishing = restarted.get_transfer(THIRD)
     assert (completed.status, completed.bytes_copied, completed.failed_at) == ("completed", 7, None)
-    assert interrupted.status == "failed"
-    assert interrupted.failure_phase == "interruption"
+    for record in (copying, publishing):
+        assert record.status == "failed"
+        assert record.failure_phase == "interruption"
+        assert record.error_code == ErrorCode.TRANSFER_INTERRUPTED
+    assert copying.bytes_copied == 5
+    assert "destination is unchanged" in (copying.error or "")
+    assert publishing.bytes_copied == 9
+    assert "may already contain" in (publishing.error or "")
 
 
-def test_terminal_transfer_cannot_change_state_again(settings: Settings) -> None:
+def test_transfer_state_changes_follow_the_state_machine(settings: Settings) -> None:
     store = _store(settings)
     store.start_transfer(FIRST, _request())
-    store.finish_transfer(FIRST, 3)
+    with pytest.raises(DataBridgeError) as unpublished_finish:
+        store.finish_transfer(FIRST)
+    store.mark_publishing(FIRST, 3)
+    with pytest.raises(DataBridgeError) as progress_while_publishing:
+        store.record_progress(FIRST, 4)
+    store.finish_transfer(FIRST)
 
-    with pytest.raises(DataBridgeError) as late_failure:
-        store.fail_transfer(FIRST, 3, "copy", "late failure")
-    with pytest.raises(DataBridgeError) as second_finish:
-        store.finish_transfer(FIRST, 4)
+    late_changes = (
+        lambda: store.record_progress(FIRST, 4),
+        lambda: store.mark_publishing(FIRST, 4),
+        lambda: store.finish_transfer(FIRST),
+        lambda: store.fail_transfer(
+            FIRST, 3, "publication", ErrorCode.SFTP_UNAVAILABLE, "late failure"
+        ),
+    )
+    for change in late_changes:
+        with pytest.raises(DataBridgeError) as conflict:
+            change()
+        assert conflict.value.code == ErrorCode.TRANSFER_STATE_CONFLICT
 
-    assert late_failure.value.code == ErrorCode.TRANSFER_STATE_CONFLICT
-    assert second_finish.value.code == ErrorCode.TRANSFER_STATE_CONFLICT
+    assert unpublished_finish.value.code == ErrorCode.TRANSFER_STATE_CONFLICT
+    assert progress_while_publishing.value.code == ErrorCode.TRANSFER_STATE_CONFLICT
     record = store.get_transfer(FIRST)
     assert (record.status, record.bytes_copied, record.failed_at) == ("completed", 3, None)
+    assert record.completed_at is not None and record.completed_at >= record.started_at
+
+
+def test_failed_transfer_records_phase_code_and_message(settings: Settings) -> None:
+    store = _store(settings)
+    store.start_transfer(FIRST, _request())
+    failed = store.fail_transfer(
+        FIRST, 2, "destination_write", ErrorCode.DESTINATION_NOT_WRITABLE, "read-only root"
+    )
+    assert (failed.status, failed.bytes_copied, failed.failure_phase) == (
+        "failed",
+        2,
+        "destination_write",
+    )
+    assert failed.error_code == ErrorCode.DESTINATION_NOT_WRITABLE
+    assert failed.error == "read-only root"
+    assert failed.completed_at is None and failed.failed_at == failed.updated_at
+
+
+def test_transfer_record_write_failure_is_a_typed_error(settings: Settings) -> None:
+    store = _store(settings)
+    store.start_transfer(FIRST, _request())
+    settings.database_path.chmod(0o400)
+    try:
+        with pytest.raises(DataBridgeError) as failure:
+            store.record_progress(FIRST, 1)
+    finally:
+        settings.database_path.chmod(0o600)
+    assert failure.value.code == ErrorCode.TRANSFER_RECORD_FAILED
+    assert failure.value.transfer_id == FIRST
+
+
+def test_transfers_are_listed_newest_first_and_filtered(settings: Settings) -> None:
+    store = _store(settings)
+    _completed(store, FIRST, 1)
+    store.start_transfer(SECOND, _request())
+    store.start_transfer(THIRD, _request())
+    store.fail_transfer(THIRD, 0, "source_open", ErrorCode.FILE_NOT_FOUND, "missing")
+
+    assert [record.id for record in store.list_transfers(None, 10)] == [THIRD, SECOND, FIRST]
+    assert [record.id for record in store.list_transfers("running", 10)] == [SECOND]
+    assert [record.id for record in store.list_transfers(None, 2)] == [THIRD, SECOND]
 
 
 def test_unknown_connection_type_fails_closed(settings: Settings) -> None:
