@@ -8,6 +8,7 @@ quickstart:
 check:
 	uv run --extra dev ruff check .
 	uv run --extra dev ruff format --check .
+	uv run --extra dev mypy
 	uv run --extra dev pytest -m "not integration"
 
 # Targets that use the Docker SFTP fixture read its port and trust file from .env.

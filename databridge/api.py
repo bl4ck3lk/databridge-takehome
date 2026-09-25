@@ -99,8 +99,19 @@ _CONNECTION_BODY = Body(
 )
 
 
+def _store(request: Request) -> ConnectionStore:
+    store: ConnectionStore = request.app.state.store
+    return store
+
+
+def _transfers(request: Request) -> TransferService:
+    transfers: TransferService = request.app.state.transfers
+    return transfers
+
+
 def _connector(request: Request, name: str) -> Connector:
-    return open_connector(request.app.state.store.get(name), request.app.state.connector_context)
+    context: ConnectorContext = request.app.state.connector_context
+    return open_connector(_store(request).get(name), context)
 
 
 def _problem_text(message: str) -> str:
@@ -152,7 +163,7 @@ def _published_openapi(application: FastAPI) -> Callable[[], dict[str, Any]]:
             for route in application.routes:
                 if not isinstance(route, APIRoute):
                     continue
-                for method in route.methods:
+                for method in route.methods or ():
                     published = schema["paths"][route.path_format][method.lower()]["responses"]
                     for status_code, declared in route.responses.items():
                         for media_type, content in declared.get("content", {}).items():
@@ -242,7 +253,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.body_params = body_log_fields(
             item.model_dump(exclude={"password"}), "/connections"
         )
-        return request.app.state.store.create(prepare_connection(item))
+        return _store(request).create(prepare_connection(item))
 
     @application.put(
         "/connections/{name}",
@@ -266,7 +277,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ErrorCode.INVALID_CONNECTION_SETTINGS,
                 f"The body names connection '{item.name}', but the path names '{name}'",
             )
-        store = request.app.state.store
+        store = _store(request)
         store.get_public(name)  # a missing connection must not create a local directory
         return store.replace(prepare_connection(item))
 
@@ -278,14 +289,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     def delete_connection(name: str, request: Request) -> Response:
         """Remove a connection; its files and its transfer records stay."""
-        request.app.state.store.delete(name)
+        _store(request).delete(name)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.get(
         "/connections", response_model=list[ConnectionView], responses=_error_responses()
     )
     def list_connections(request: Request) -> list[ConnectionView]:
-        return request.app.state.store.list_public()
+        return _store(request).list_public()
 
     @application.get(
         "/connections/{name}",
@@ -293,7 +304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses=_error_responses(ErrorCode.CONNECTION_NOT_FOUND),
     )
     def get_connection(name: str, request: Request) -> ConnectionView:
-        return request.app.state.store.get_public(name)
+        return _store(request).get_public(name)
 
     listing_errors = (
         ErrorCode.CONNECTION_NOT_FOUND,
@@ -436,7 +447,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
     ) -> TransferRecord:
         request.state.body_params = body_log_fields(item.model_dump(), "/transfers")
-        record = request.app.state.transfers.run(item)
+        record = _transfers(request).run(item)
         request.state.transfer_id = record.id
         return record
 
@@ -456,7 +467,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ] = 50,
     ) -> list[TransferRecord]:
         """List transfers newest first; a running transfer shows its latest progress."""
-        return request.app.state.store.list_transfers(status_filter, limit)
+        return _store(request).list_transfers(status_filter, limit)
 
     @application.get(
         "/transfers/{transfer_id}",
@@ -464,7 +475,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses=_error_responses(ErrorCode.TRANSFER_NOT_FOUND),
     )
     def get_transfer(transfer_id: str, request: Request) -> TransferRecord:
-        return request.app.state.store.get_transfer(transfer_id)
+        return _store(request).get_transfer(transfer_id)
 
     return application
 

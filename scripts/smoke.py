@@ -27,14 +27,15 @@ def _port() -> int:
 
 def _request(base: str, method: str, path: str, body: dict | None = None) -> dict:
     data = json.dumps(body).encode() if body is not None else None
-    request = Request(
+    # The base is always http://127.0.0.1 with a port this script chose, never caller input.
+    request = Request(  # noqa: S310
         base + path,
         data=data,
         method=method,
         headers={"Content-Type": "application/json"} if data is not None else {},
     )
     try:
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=45) as response:  # noqa: S310
             return json.load(response)
     except HTTPError as exc:
         raise RuntimeError(f"{method} {path} returned {exc.code}: {exc.read().decode()}") from exc
@@ -116,7 +117,8 @@ def main() -> None:
         )
         server_log = Path(temp) / "uvicorn.stderr.log"
         with server_log.open("wb") as log:
-            process = subprocess.Popen(
+            # Fixed arguments: this interpreter runs uvicorn on a port this script chose.
+            process = subprocess.Popen(  # noqa: S603
                 [
                     sys.executable,
                     "-m",

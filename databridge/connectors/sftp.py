@@ -8,7 +8,7 @@ import stat
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from contextlib import AbstractContextManager, closing, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,14 +171,15 @@ class _Requests:
         else:
             self._replies[number] = (kind, message.get_remainder())
 
+    # The stubs omit paramiko's private request layer; the class docstring explains the use.
     def send(self, kind: int, *args: object) -> int:
         with self._watched():
-            return int(self._client._async_request(self, kind, *args))
+            return int(self._client._async_request(self, kind, *args))  # type: ignore[attr-defined]
 
     def receive(self, number: int, expected: int = CMD_STATUS) -> _Reader:
         with self._watched():
             while number not in self._replies:
-                self._client._read_response()
+                self._client._read_response()  # type: ignore[attr-defined]
         kind, payload = self._replies.pop(number)
         reply = _Reader(payload)
         if kind == _OVERSIZED:
@@ -604,7 +605,7 @@ class SFTPConnector:
             ),
         )
 
-    def _entries(self, requests: _Requests) -> Iterator[tuple[str, bool]]:
+    def _entries(self, requests: _Requests) -> Generator[tuple[str, bool]]:
         """Yield `(name, is_regular_file)` per entry, reading one READDIR reply at a time."""
         handle = requests.open_directory(self.root)
         try:
