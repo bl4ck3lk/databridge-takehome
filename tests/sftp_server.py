@@ -7,6 +7,7 @@ READDIR returns lstat attributes.
 
 import os
 import socket
+import struct
 import threading
 import time
 from collections import Counter
@@ -20,7 +21,9 @@ from paramiko import Message, SFTPAttributes, SFTPHandle, SFTPServer, SFTPServer
 from paramiko.sftp import (
     CMD_EXTENDED,
     CMD_NAME,
+    CMD_STATUS,
     SFTP_BAD_MESSAGE,
+    SFTP_EOF,
     SFTP_FAILURE,
     SFTP_OK,
     SFTP_OP_UNSUPPORTED,
@@ -40,7 +43,8 @@ class Scenario:
     remove, rename, posix_rename, chattr. `malformed_names` replaces each READDIR reply with a
     hostile one: "count" claims 2**31-1 entries, "oversized" exceeds 256 KiB, and "extended"
     claims 2**31-1 extended attributes. `chatter_seconds` delays each READDIR reply while the
-    server sends replies to requests that were never made.
+    server sends replies to requests that were never made. `trickle_readdir` answers READDIR
+    with an end-of-directory status sent one byte every 0.2 seconds.
     """
 
     drop_before: str | None = None
@@ -57,6 +61,7 @@ class Scenario:
     omit_sizes: bool = False
     malformed_names: str | None = None
     chatter_seconds: float = 0.0
+    trickle_readdir: bool = False
     calls: Counter[str] = field(default_factory=Counter)
     pipelined: Counter[str] = field(default_factory=Counter)
 
@@ -258,6 +263,18 @@ class _Server(SFTPServer):
 
     def _read_folder(self, request_number: int, folder: SFTPHandle) -> None:
         self.server.begin("readdir")
+        if self.server.scenario.trickle_readdir:
+            reply = Message()
+            reply.add_int(request_number)
+            reply.add_int(SFTP_EOF)
+            reply.add_string("")
+            reply.add_string("")
+            payload = reply.asbytes()
+            packet = struct.pack(">I", len(payload) + 1) + bytes([CMD_STATUS]) + payload
+            for index in range(len(packet)):
+                self.sock.send(packet[index : index + 1])
+                time.sleep(0.2)
+            return
         chatter_until = time.monotonic() + self.server.scenario.chatter_seconds
         while time.monotonic() < chatter_until:
             self._send_status(0x7FFFFFF0, SFTP_OK)

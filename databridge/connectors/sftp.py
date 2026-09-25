@@ -5,6 +5,7 @@ import posixpath
 import shlex
 import socket
 import stat
+import threading
 import time
 from collections import deque
 from collections.abc import Iterator
@@ -76,6 +77,8 @@ MAX_REPLY = 262_144
 _OVERSIZED = -1
 _CONNECT_TIMEOUT = 10
 _REPLY_TIMEOUT = 30
+"""Seconds one request may take to send, or its reply to arrive, before the session is closed."""
+_WATCH_INTERVAL = 0.25
 _LOST = (OSError, EOFError, paramiko.SSHException)
 """Transport failures: every one of them means the session is gone."""
 
@@ -153,8 +156,9 @@ class _Requests:
     in `_LOST` comes from the transport.
     """
 
-    def __init__(self, client: paramiko.SFTPClient) -> None:
+    def __init__(self, client: paramiko.SFTPClient, watchdog: "_Watchdog") -> None:
         self._client = client
+        self._watchdog = watchdog
         self._replies: dict[int, tuple[int, bytes]] = {}
         self._ignored: set[int] = set()
 
@@ -168,16 +172,13 @@ class _Requests:
             self._replies[number] = (kind, message.get_remainder())
 
     def send(self, kind: int, *args: object) -> int:
-        return int(self._client._async_request(self, kind, *args))
+        with self._watched():
+            return int(self._client._async_request(self, kind, *args))
 
     def receive(self, number: int, expected: int = CMD_STATUS) -> _Reader:
-        # Each packet read may take up to the channel timeout; unrelated packets must not
-        # extend the wait for this reply indefinitely.
-        deadline = time.monotonic() + _REPLY_TIMEOUT
-        while number not in self._replies:
-            if time.monotonic() > deadline:
-                raise TimeoutError("The SFTP server did not answer in time")
-            self._client._read_response()
+        with self._watched():
+            while number not in self._replies:
+                self._client._read_response()
         kind, payload = self._replies.pop(number)
         reply = _Reader(payload)
         if kind == _OVERSIZED:
@@ -194,6 +195,17 @@ class _Requests:
 
     def call(self, kind: int, *args: object, expected: int = CMD_STATUS) -> _Reader:
         return self.receive(self.send(kind, *args), expected)
+
+    @contextmanager
+    def _watched(self) -> Iterator[None]:
+        """Bound one send or one wait for a reply; report an abandoned step as a timeout."""
+        try:
+            with self._watchdog.step(_REPLY_TIMEOUT):
+                yield
+        except _LOST as exc:
+            if self._watchdog.expired:
+                raise TimeoutError("The SFTP server did not respond in time") from exc
+            raise
 
     def ignore(self, number: int) -> None:
         """Drop the reply to a request whose outcome no longer matters."""
@@ -282,7 +294,61 @@ def _failures(
             f"The SFTP server sent an invalid reply while trying to {action}",
         ) from exc
     except _LOST as exc:
-        raise (lost or _unavailable(action)) from exc
+        if lost is not None:
+            raise lost from exc
+        if isinstance(exc, TimeoutError):
+            raise DataBridgeError(
+                ErrorCode.SFTP_UNAVAILABLE,
+                f"The SFTP server did not respond within {_REPLY_TIMEOUT:g} seconds while "
+                f"trying to {action}",
+            ) from exc
+        raise _unavailable(action) from exc
+
+
+class _Watchdog:
+    """Closes a session's transport when one step outlives its deadline.
+
+    Paramiko's timeouts bound each socket wait, and some channel requests wait without one, so
+    a server that sends one byte before every timeout could hold a worker thread forever.
+    Closing the transport wakes every blocked paramiko call, which then fails as a lost session.
+    """
+
+    def __init__(self, transport: paramiko.Transport) -> None:
+        self._transport = transport
+        self._condition = threading.Condition()
+        self._deadline: float | None = None
+        self._stopped = False
+        self.expired = False
+        self._thread = threading.Thread(target=self._watch, name="sftp-watchdog", daemon=True)
+        self._thread.start()
+
+    @contextmanager
+    def step(self, seconds: float) -> Iterator[None]:
+        with self._condition:
+            self._deadline = time.monotonic() + seconds
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._deadline = None
+
+    def stop(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify()
+        self._thread.join()
+
+    def _watch(self) -> None:
+        with self._condition:
+            while not self._stopped and not self._overdue():
+                self._condition.wait(_WATCH_INTERVAL)
+            if self._stopped:
+                return
+            self.expired = True
+        self._transport.close()
+
+    def _overdue(self) -> bool:
+        return self._deadline is not None and time.monotonic() >= self._deadline
 
 
 def _host_key_name(host: str, port: int) -> str:
@@ -699,23 +765,28 @@ class SFTPConnector:
         client = paramiko.SSHClient()
         try:
             self._trust(client)
-            self._connect(client)
-            with _failures(
-                "open an SFTP session",
-                lost=DataBridgeError(
-                    ErrorCode.SFTP_UNAVAILABLE, "The SFTP server did not open an SFTP session"
-                ),
-            ):
-                sftp = client.open_sftp()
+            transport = self._connect(client)
+            watchdog = _Watchdog(transport)
             try:
-                channel = sftp.get_channel()
-                if channel is not None:
-                    channel.settimeout(_REPLY_TIMEOUT)
-                yield _Requests(sftp)
+                with (
+                    _failures(
+                        "open an SFTP session",
+                        lost=DataBridgeError(
+                            ErrorCode.SFTP_UNAVAILABLE,
+                            "The SFTP server did not open an SFTP session",
+                        ),
+                    ),
+                    watchdog.step(_CONNECT_TIMEOUT),
+                ):
+                    sftp = client.open_sftp()
+                try:
+                    yield _Requests(sftp, watchdog)
+                finally:
+                    # Closing the channel of a dropped session raises; the outcome is known.
+                    with suppress(*_LOST):
+                        sftp.close()
             finally:
-                # Closing the channel of a dropped session raises; the outcome is already known.
-                with suppress(*_LOST):
-                    sftp.close()
+                watchdog.stop()
         finally:
             client.close()
 
@@ -735,7 +806,7 @@ class SFTPConnector:
             f"the server's fingerprint, trust it with: {self.keyscan_command}",
         )
 
-    def _connect(self, client: paramiko.SSHClient) -> None:
+    def _connect(self, client: paramiko.SSHClient) -> paramiko.Transport:
         connection = self.connection
         try:
             client.connect(
@@ -778,6 +849,13 @@ class SFTPConnector:
                 ErrorCode.SFTP_UNAVAILABLE,
                 f"Cannot connect to the SFTP server at {self.host_key_name}",
             ) from exc
+        transport = client.get_transport()
+        if transport is None or not transport.is_active():
+            raise DataBridgeError(
+                ErrorCode.SFTP_UNAVAILABLE,
+                f"The SFTP server at {self.host_key_name} closed the connection",
+            )
+        return transport
 
 
 def _names(reply: _Reader) -> list[tuple[str, _Attributes]]:

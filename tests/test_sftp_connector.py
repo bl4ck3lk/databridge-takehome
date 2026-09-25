@@ -146,6 +146,19 @@ def test_unrelated_replies_do_not_extend_the_reply_timeout(
     started = time.monotonic()
     error = _error(remote.connector().list_files)
     assert error.code == ErrorCode.SFTP_UNAVAILABLE
+    assert "did not respond within" in error.message
+    assert time.monotonic() - started < 2
+
+
+def test_a_reply_trickled_byte_by_byte_is_abandoned(
+    serve: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sftp, "_REPLY_TIMEOUT", 0.3)
+    remote = serve(Scenario(trickle_readdir=True))
+    started = time.monotonic()
+    error = _error(remote.connector().list_files)
+    assert error.code == ErrorCode.SFTP_UNAVAILABLE
+    assert "did not respond within" in error.message
     assert time.monotonic() - started < 2
 
 
