@@ -1,13 +1,172 @@
 """Preview shape, inference, and byte-budget behavior."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
+import pytest
 from support import client_for
 
 from databridge.config import Settings
-from databridge.preview import MAX_PREVIEW_BYTES
+from databridge.connectors.base import AccessCheck, Listing
+from databridge.errors import DataBridgeError, ErrorCode
+from databridge.preview import MAX_PREVIEW_BYTES, preview
 
 FIXTURES = Path(__file__).resolve().parents[1] / "instructions"
+
+
+class _Trickle:
+    """A source that returns at most seven bytes per read, as the ByteSource contract allows."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.offset = 0
+
+    def read(self, size: int, /) -> bytes:
+        chunk = self.data[self.offset : self.offset + min(size, 7)]
+        self.offset += len(chunk)
+        return chunk
+
+
+class _TrickleConnector:
+    def __init__(self, files: dict[str, bytes]) -> None:
+        self.files = files
+
+    def list_files(self) -> Listing:
+        return Listing(sorted(self.files), False)
+
+    def check_access(self) -> AccessCheck:
+        return AccessCheck(writable=False)
+
+    @contextmanager
+    def read(self, filename: str) -> Iterator[_Trickle]:
+        yield _Trickle(self.files[filename])
+
+    @contextmanager
+    def write(self, filename: str, staging_id: str, overwrite: bool) -> Iterator[Any]:
+        raise NotImplementedError("read-only test connector")
+        yield
+
+
+def _head(settings: Settings, folder: Path, filename: str, limit: int = 5) -> Any:
+    with client_for(settings) as client:
+        created = client.post(
+            "/connections", json={"name": "files", "type": "local", "path": str(folder)}
+        )
+        assert created.status_code in {201, 409}  # 409: an earlier call created it
+        return client.get(f"/connections/files/files/{filename}/head", params={"limit": limit})
+
+
+def test_preview_fills_its_budget_from_short_reads() -> None:
+    rows = "".join(f"{index},name-{index}\n" for index in range(10))
+    connector = _TrickleConnector({"data.csv": ("id,name\n" + rows).encode()})
+    result = preview(connector, "data.csv", 10)
+    assert [row["id"] for row in result.rows] == [str(index) for index in range(10)]
+    over_budget = _TrickleConnector({"wide.csv": b"field\n" + b"x" * MAX_PREVIEW_BYTES + b"\n"})
+    with pytest.raises(DataBridgeError) as error:
+        preview(over_budget, "wide.csv", 1)
+    assert error.value.code == ErrorCode.PREVIEW_LIMIT_EXCEEDED
+
+
+def test_csv_field_longer_than_the_csv_module_default(settings: Settings, tmp_path: Path) -> None:
+    long_value = "v" * 200_000
+    (tmp_path / "long.csv").write_text(f"id,text\n1,{long_value}\n")
+    response = _head(settings, tmp_path, "long.csv")
+    assert response.status_code == 200
+    assert response.json()["rows"] == [{"id": "1", "text": long_value}]
+
+
+def test_csv_blank_lines_are_skipped(settings: Settings, tmp_path: Path) -> None:
+    (tmp_path / "blank.csv").write_bytes(b"a,b\n\n1,2\n\r\n3,4\n\n")
+    response = _head(settings, tmp_path, "blank.csv")
+    assert response.status_code == 200
+    assert response.json()["rows"] == [{"a": "1", "b": "2"}, {"a": "3", "b": "4"}]
+
+
+def test_csv_values_keep_unicode_separators_and_quoted_newlines(
+    settings: Settings, tmp_path: Path
+) -> None:
+    (tmp_path / "separators.csv").write_bytes(
+        'name,note\nx,a b\ny,c\x85d\x0ce\nz,"first\nsecond"\n'.encode()
+    )
+    response = _head(settings, tmp_path, "separators.csv")
+    assert response.status_code == 200
+    assert [row["note"] for row in response.json()["rows"]] == [
+        "a b",
+        "c\x85d\x0ce",
+        "first\nsecond",
+    ]
+
+
+def test_csv_record_cut_by_the_byte_limit_is_never_returned(
+    settings: Settings, tmp_path: Path
+) -> None:
+    prefix = b"field\n" + (b"x" * 10_000 + b"\n") * 98
+    cut_row = b"y" * 100 + " ".encode() + b"z" * (MAX_PREVIEW_BYTES - len(prefix)) + b"\n"
+    (tmp_path / "cut.csv").write_bytes(prefix + cut_row)
+    response = _head(settings, tmp_path, "cut.csv", limit=99)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "PREVIEW_LIMIT_EXCEEDED"
+
+
+@pytest.mark.parametrize(
+    ("document", "code"),
+    [
+        ("[" * 100_000 + "]" * 100_000, "PREVIEW_LIMIT_EXCEEDED"),
+        ('[{"a":' + "[" * 40 + "]" * 40 + "}]", "PREVIEW_LIMIT_EXCEEDED"),
+        ('[{"a":"\\ud800"}]', "MALFORMED_FILE"),
+        ('[{"\\udc00":1}]', "MALFORMED_FILE"),
+        ('[{"a":1e400}]', "MALFORMED_FILE"),
+        ('[{"a":' + "1" * 5_000 + "}]", "MALFORMED_FILE"),
+    ],
+    ids=[
+        "deep-array",
+        "deep-row",
+        "lone-surrogate-value",
+        "lone-surrogate-key",
+        "overflow",
+        "digits",
+    ],
+)
+@pytest.mark.parametrize("padded", [False, True], ids=["complete", "over-budget"])
+def test_hostile_json_is_rejected_with_a_preview_error(
+    settings: Settings, tmp_path: Path, document: str, code: str, padded: bool
+) -> None:
+    if padded:
+        document = document[:-1] + ',{"pad":"' + "p" * MAX_PREVIEW_BYTES + '"}]'
+    (tmp_path / "hostile.json").write_text(document)
+    response = _head(settings, tmp_path, "hostile.json", limit=1)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == code
+
+
+def test_type_inference_uses_ascii_grammars_and_strict_dates(
+    settings: Settings, tmp_path: Path
+) -> None:
+    (tmp_path / "grammar.csv").write_text(
+        "underscored,arabic,compact,week,exponent,overflow\n"
+        "1_000,١٢٣,20240101,2024-W01-1,1e5,1e400\n"
+    )
+    (tmp_path / "grammar.json").write_text(
+        '[{"compact":"20240101","week":"2024-W01-1","day":"2024-01-31","invalid":"2024-02-30"}]'
+    )
+    csv_schema = _head(settings, tmp_path, "grammar.csv").json()["schema"]
+    json_schema = _head(settings, tmp_path, "grammar.json").json()["schema"]
+    assert csv_schema == {
+        "underscored": "string",
+        "arabic": "string",
+        "compact": "integer",
+        "week": "string",
+        "exponent": "float",
+        "overflow": "string",
+    }
+    assert json_schema == {
+        "compact": "string",
+        "week": "string",
+        "day": "date",
+        "invalid": "string",
+    }
 
 
 def test_supplied_csv_and_json_preview(settings: Settings) -> None:

@@ -29,7 +29,7 @@ from databridge.models import (
     TransferRequest,
     TransferStatus,
 )
-from databridge.preview import preview
+from databridge.preview import DEFAULT_PREVIEW_ROWS, MAX_PREVIEW_ROWS, preview
 from databridge.request_log import RequestLog
 from databridge.store import ConnectionStore, DatabaseOwnerLock
 from databridge.transfer import TransferService
@@ -303,7 +303,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
     )
     def preview_file(
-        name: str, filename: str, request: Request, limit: int = Query(default=5, ge=1, le=100)
+        name: str,
+        filename: str,
+        request: Request,
+        limit: Annotated[
+            int, Query(ge=1, le=MAX_PREVIEW_ROWS, description="Rows to return")
+        ] = DEFAULT_PREVIEW_ROWS,
     ) -> PreviewResult:
         connector = open_connector(
             request.app.state.store.get(name), request.app.state.connector_context

@@ -109,7 +109,8 @@ parses at most 1 MiB, and reads one extra byte to detect truncation. CSV values
 remain strings; JSON values retain their types.
 Schema inference ignores empty/null values, widens integer plus float to float,
 and uses string for incompatible values or an entirely empty field. JSON numeric
-and boolean strings remain strings; ISO date strings infer as dates. A small JSON
+and boolean strings remain strings; `YYYY-MM-DD` strings that name a real day
+infer as dates, and numbers use ASCII digits only. A small JSON
 file is validated in full; for larger files, the preview validates the bounded
 prefix it reads. Transfer copies 1 MiB binary chunks and does not parse files.
 
