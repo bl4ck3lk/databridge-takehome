@@ -7,7 +7,7 @@
   "measurement": "HTTP TestClient round trip; duration includes SSH connection and publish",
   "memory_note": "ru_maxrss is a process lifetime peak and is cumulative across cases",
   "latency_note": "round_trip_ms > 0 routes through a loopback relay that delays each direction by half the round trip without limiting bandwidth",
-  "baseline_peak_process_rss_mib": 64.03,
+  "baseline_peak_process_rss_mib": 63.34,
   "results": [
     {
       "size_mib": 16,
@@ -15,16 +15,16 @@
       "bytes": 16777216,
       "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
       "upload": {
-        "duration_seconds": 0.584,
-        "throughput_mib_s": 27.4,
-        "peak_process_rss_mib": 69.8,
-        "transfer_id": "de0b66f5-c545-4f3d-ad5c-f62d559c1b0d"
+        "duration_seconds": 0.557,
+        "throughput_mib_s": 28.72,
+        "peak_process_rss_mib": 69.0,
+        "transfer_id": "44b8410f-fd37-40fd-9c19-36a4596a9574"
       },
       "download": {
-        "duration_seconds": 0.565,
-        "throughput_mib_s": 28.31,
-        "peak_process_rss_mib": 77.16,
-        "transfer_id": "c082fa85-40aa-4ae4-a4a9-b870f9b445f4"
+        "duration_seconds": 0.503,
+        "throughput_mib_s": 31.82,
+        "peak_process_rss_mib": 72.98,
+        "transfer_id": "244f6617-5f92-43ff-9347-9ce62000ba59"
       }
     },
     {
@@ -33,16 +33,16 @@
       "bytes": 268435456,
       "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
       "upload": {
-        "duration_seconds": 2.446,
-        "throughput_mib_s": 104.66,
-        "peak_process_rss_mib": 77.27,
-        "transfer_id": "5c0ff191-a911-4731-88be-13eb94e8fe6e"
+        "duration_seconds": 2.132,
+        "throughput_mib_s": 120.09,
+        "peak_process_rss_mib": 73.41,
+        "transfer_id": "15e77195-7526-4f31-9f57-2f28c36a21af"
       },
       "download": {
-        "duration_seconds": 5.495,
-        "throughput_mib_s": 46.59,
-        "peak_process_rss_mib": 77.27,
-        "transfer_id": "f7360704-8254-463c-97b9-750342afa4dd"
+        "duration_seconds": 3.726,
+        "throughput_mib_s": 68.71,
+        "peak_process_rss_mib": 73.41,
+        "transfer_id": "29b2ad5c-c328-4616-883c-87e0ddc431d4"
       }
     },
     {
@@ -51,16 +51,16 @@
       "bytes": 16777216,
       "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
       "upload": {
-        "duration_seconds": 0.984,
-        "throughput_mib_s": 16.26,
-        "peak_process_rss_mib": 77.27,
-        "transfer_id": "58239a4b-5099-45b0-83ba-5bce369a9fca"
+        "duration_seconds": 1.011,
+        "throughput_mib_s": 15.82,
+        "peak_process_rss_mib": 73.41,
+        "transfer_id": "2e9cf0a0-575a-44ee-9f8e-996eecec01b2"
       },
       "download": {
-        "duration_seconds": 0.815,
-        "throughput_mib_s": 19.64,
-        "peak_process_rss_mib": 77.27,
-        "transfer_id": "779de421-3c57-4fc0-8b74-6c7c8579f357"
+        "duration_seconds": 0.823,
+        "throughput_mib_s": 19.43,
+        "peak_process_rss_mib": 73.41,
+        "transfer_id": "687cb31d-2ce4-421b-a16d-ee7e912481e3"
       }
     }
   ]
