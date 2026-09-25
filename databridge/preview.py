@@ -18,7 +18,6 @@ MAX_PREVIEW_BYTES = 1_048_576
 DEFAULT_PREVIEW_ROWS = 5
 MAX_PREVIEW_ROWS = 100
 MAX_JSON_DEPTH = 32
-_TOKEN_TAIL = 6  # the longest cut token that can end a budget: a "\uXXXX" escape
 InferredType = Literal["string", "integer", "float", "boolean", "date"]
 _INTEGER = re.compile(r"[+-]?[0-9]+")
 _FLOAT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
@@ -199,10 +198,24 @@ def _json_prefix(text: str, limit: int) -> list[dict[str, Any]]:
 
 
 def _cut_by_budget(error: json.JSONDecodeError, text: str) -> bool:
-    """Whether more bytes could still complete the entry. The decoder reports an unterminated
-    string at its start and a cut number or escape a few characters before the end; any other
-    error proves the entry malformed whatever follows."""
-    return error.msg.startswith("Unterminated string") or error.pos >= len(text) - _TOKEN_TAIL
+    """Only a token that more bytes can complete is an incomplete preview."""
+    suffix = text[error.pos :]
+    if error.msg.startswith("Unterminated string"):
+        return True
+    if error.msg == "Invalid \\uXXXX escape":
+        return bool(re.fullmatch(r"u[0-9a-fA-F]{0,3}", suffix))
+    if error.msg == "Expecting value":
+        return (
+            suffix == ""
+            or suffix == "-"
+            or any(literal.startswith(suffix) for literal in ("true", "false", "null"))
+        )
+    if error.msg == "Expecting ',' delimiter":
+        return suffix in {"", ".", "e", "E", "e+", "e-", "E+", "E-"}
+    return error.pos == len(text) and error.msg in {
+        "Expecting property name enclosed in double quotes",
+        "Expecting ':' delimiter",
+    }
 
 
 def _skip_space(text: str, position: int) -> int:

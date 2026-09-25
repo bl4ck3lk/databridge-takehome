@@ -575,24 +575,30 @@ class SFTPConnector:
         with self._session() as requests:
             with self._root_failures():
                 requests.close_quietly(requests.open_directory(self.root))
-            with _failures(
-                f"test write access to '{self.root}'", missing=_root_unavailable(self.root)
-            ):
-                try:
-                    handle = requests.open(
-                        probe, SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
-                    )
-                except _Status as status:
-                    if status.code == SFTP_PERMISSION_DENIED:
-                        return AccessCheck(writable=False)
-                    raise
-            requests.close_quietly(handle)
-            # The check leaves nothing behind, so a probe it cannot remove fails the check.
-            with _failures(
-                f"remove the write-access probe '{name}' from '{self.root}'",
-                missing=_root_unavailable(self.root),
-            ):
-                requests.call(CMD_REMOVE, probe)
+            removed = False
+            try:
+                with _failures(
+                    f"test write access to '{self.root}'", missing=_root_unavailable(self.root)
+                ):
+                    try:
+                        handle = requests.open(
+                            probe, SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
+                        )
+                    except _Status as status:
+                        if status.code == SFTP_PERMISSION_DENIED:
+                            return AccessCheck(writable=False)
+                        raise
+                requests.close_quietly(handle)
+                # The check leaves nothing behind, so a probe it cannot remove fails the check.
+                with _failures(
+                    f"remove the write-access probe '{name}' from '{self.root}'",
+                    missing=_root_unavailable(self.root),
+                ):
+                    requests.call(CMD_REMOVE, probe)
+                removed = True
+            finally:
+                if not removed:
+                    requests.remove_quietly(probe)
         return AccessCheck(writable=True)
 
     @contextmanager
@@ -633,22 +639,24 @@ class SFTPConnector:
         with self._session() as requests:
             with _failures(f"inspect '{filename}'", denied=_not_writable(self.root)):
                 mode = self._replaceable_mode(requests, destination, filename, overwrite)
-            with _failures(
-                "create the staging file",
-                missing=_root_unavailable(self.root),
-                denied=_not_writable(self.root),
-            ):
-                flags = SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
-                upload = _Upload(requests, requests.open(stage, flags), self.root, stage, mode)
+            upload: _Upload | None = None
             published = False
             try:
+                with _failures(
+                    "create the staging file",
+                    missing=_root_unavailable(self.root),
+                    denied=_not_writable(self.root),
+                ):
+                    flags = SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
+                    upload = _Upload(requests, requests.open(stage, flags), self.root, stage, mode)
                 yield upload
                 upload.finish()
                 self._publish(requests, stage, destination, filename, overwrite)
                 published = True
             finally:
                 if not published:
-                    upload.release()
+                    if upload is not None:
+                        upload.release()
                     requests.remove_quietly(stage)
 
     def _path(self, filename: str) -> str:
@@ -702,7 +710,9 @@ class SFTPConnector:
                         try:
                             reply = requests.receive(lookups.pop(index), CMD_ATTRS)
                             mode = reply.attributes().mode
-                        except _Status:
+                        except _Status as status:
+                            if status.code not in {SFTP_NO_SUCH_FILE, SFTP_PERMISSION_DENIED}:
+                                raise
                             mode = None  # removed or hidden since READDIR
                     yield name, mode is not None and stat.S_ISREG(mode)
             finally:
@@ -827,7 +837,9 @@ class SFTPConnector:
             finally:
                 watchdog.stop()
         finally:
-            client.close()
+            # A completed operation is not undone by a transport teardown failure.
+            with suppress(*_LOST):
+                client.close()
 
     def _trust(self, client: paramiko.SSHClient) -> None:
         try:

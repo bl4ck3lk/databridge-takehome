@@ -10,6 +10,7 @@ import paramiko
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "trust_sftp_fixture.sh"
+QUICKSTART = SCRIPT.parent / "quickstart.sh"
 PORT = "2299"
 KEY = paramiko.ECDSAKey.generate()
 TRUSTED = f"[127.0.0.1]:{PORT} {KEY.get_name()} {KEY.get_base64()}"
@@ -74,3 +75,20 @@ def test_rerunning_adds_nothing(tmp_path: Path) -> None:
     _trust(tmp_path, known_hosts, scanned=TRUSTED)
     assert known_hosts.read_text() == before
     assert not called.exists()
+
+
+def test_quickstart_reports_missing_ssh_keyscan_before_setup(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "dirname").symlink_to("/usr/bin/dirname")
+    (bin_dir / "ssh-keygen").symlink_to(shutil.which("ssh-keygen"))
+    result = subprocess.run(
+        ["/bin/sh", str(QUICKSTART)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": str(bin_dir)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode != 0
+    assert "OpenSSH client (ssh-keyscan is missing)" in result.stderr

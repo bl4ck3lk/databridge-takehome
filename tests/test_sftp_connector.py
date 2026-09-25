@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import paramiko
 import pytest
-from paramiko.sftp import CMD_LSTAT
+from paramiko.sftp import CMD_HANDLE, CMD_LSTAT, SFTP_BAD_MESSAGE
 from pydantic import SecretStr
 from sftp_server import PASSWORD, USERNAME, FakeSFTPServer, Scenario
 from support import read_all
@@ -178,6 +178,48 @@ def test_hostile_listing_reply_fails_fast(serve: Callable[..., Remote], malforme
     error = _error(remote.connector().list_files)
     assert error.code == ErrorCode.SFTP_OPERATION_FAILED
     assert time.monotonic() - started < 5
+
+
+def test_malformed_lstat_does_not_silently_omit_a_file(
+    serve: Callable[..., Remote], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = serve(Scenario(omit_permissions=True))
+    (remote.files / "visible.csv").write_text("a\n")
+    receive = sftp._Requests.receive
+
+    def bad_lstat(self: sftp._Requests, number: int, expected: int, **kw: Any) -> Any:
+        if expected == sftp.CMD_ATTRS:
+            raise sftp._Status(SFTP_BAD_MESSAGE, "malformed LSTAT reply")
+        return receive(self, number, expected, **kw)
+
+    monkeypatch.setattr(sftp._Requests, "receive", bad_lstat)
+    error = _error(remote.connector().list_files)
+    assert error.code == ErrorCode.SFTP_OPERATION_FAILED
+
+
+@pytest.mark.parametrize("action", ["write", "check"])
+def test_open_reply_failure_removes_a_created_hidden_file(
+    remote: Remote, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    receive = sftp._Requests.receive
+
+    def bad_handle(self: sftp._Requests, number: int, expected: int, **kw: Any) -> Any:
+        reply = receive(self, number, expected, **kw)
+        if expected == CMD_HANDLE and remote.scenario.calls["open"]:
+            raise sftp._Status(SFTP_BAD_MESSAGE, "malformed handle reply")
+        return reply
+
+    monkeypatch.setattr(sftp._Requests, "receive", bad_handle)
+    connector = remote.connector()
+    operation = (
+        (lambda: _write(connector, "target.bin", b"data"))
+        if action == "write"
+        else connector.check_access
+    )
+    assert _error(operation).code == ErrorCode.SFTP_OPERATION_FAILED
+    assert remote.scenario.calls["open"] == 1
+    assert not (remote.files / "target.bin").exists()
+    assert not list(remote.files.iterdir())
 
 
 @pytest.mark.parametrize(
@@ -602,3 +644,31 @@ def test_a_failed_tail_write_is_a_write_failure_not_a_publication(
     assert (record.status, record.failure_phase) == ("failed", "destination_write")
     assert marked == []
     assert not (remote.files / "t.bin").exists()
+
+
+def test_client_teardown_failure_keeps_a_published_transfer_completed(
+    remote: Remote, settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "data.bin").write_bytes(b"published bytes")
+    store = ConnectionStore(settings.database_path, settings.encryption_key)
+    store.initialize()
+    store.create(LocalConnection(name="local", type="local", path=str(source_root)))
+    connector = remote.connector()
+    store.create(connector.connection)
+    connectors: dict[str, Any] = {"local": LocalConnector(source_root), "remote": connector}
+    close = paramiko.SSHClient.close
+
+    def close_then_fail(self: paramiko.SSHClient) -> None:
+        close(self)
+        raise OSError("simulated teardown failure")
+
+    monkeypatch.setattr(paramiko.SSHClient, "close", close_then_fail)
+    request = TransferRequest(
+        source="local", source_file="data.bin", destination="remote", destination_file="t.bin"
+    )
+    record = TransferService(store, lambda connection: connectors[connection.name]).run(request)
+    assert record.status == "completed"
+    assert store.get_transfer(record.id).status == "completed"
+    assert (remote.files / "t.bin").read_bytes() == b"published bytes"

@@ -126,7 +126,14 @@ class DatabaseOwnerLock:
                 f"Another DataBridge process is using the database locked by {self.path}; "
                 "stop that process before starting another"
             ) from None
-        os.fchmod(descriptor, 0o600)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        try:
+            os.fchmod(descriptor, 0o600)
+        except BaseException:
+            os.close(descriptor)
+            raise
         self._descriptor = descriptor
         return self
 
@@ -137,9 +144,12 @@ class DatabaseOwnerLock:
         traceback: TracebackType | None,
     ) -> None:
         if self._descriptor is not None:
-            fcntl.flock(self._descriptor, fcntl.LOCK_UN)
-            os.close(self._descriptor)
+            descriptor = self._descriptor
             self._descriptor = None
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 class ConnectionStore:
@@ -164,8 +174,10 @@ class ConnectionStore:
     def initialize(self) -> None:
         _private_directory(self.path.parent)
         descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        os.fchmod(descriptor, 0o600)
-        os.close(descriptor)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
         with self._connect() as connection:
             tables = {
                 row["name"]

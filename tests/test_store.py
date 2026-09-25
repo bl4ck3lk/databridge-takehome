@@ -63,6 +63,64 @@ def test_owner_lock_is_released_when_its_holder_exits(tmp_path: Path) -> None:
         pass
 
 
+def test_owner_lock_closes_descriptor_when_chmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state" / "databridge.owner.lock"
+    chmod = os.fchmod
+
+    def fail_once(descriptor: int, mode: int) -> None:
+        monkeypatch.setattr(os, "fchmod", chmod)
+        raise OSError("simulated chmod failure")
+
+    monkeypatch.setattr(os, "fchmod", fail_once)
+    with pytest.raises(OSError, match="simulated chmod failure"):
+        with DatabaseOwnerLock(path):
+            pass
+    with DatabaseOwnerLock(path):
+        pass
+
+
+def test_owner_lock_closes_descriptor_when_unlock_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "state" / "databridge.owner.lock"
+    flock = store_module.fcntl.flock
+    held: list[int] = []
+
+    def fail_unlock(descriptor: int, operation: int) -> None:
+        if operation == store_module.fcntl.LOCK_UN:
+            held.append(descriptor)
+            raise OSError("simulated unlock failure")
+        flock(descriptor, operation)
+
+    monkeypatch.setattr(store_module.fcntl, "flock", fail_unlock)
+    with pytest.raises(OSError, match="simulated unlock failure"):
+        with DatabaseOwnerLock(path):
+            pass
+    assert len(held) == 1
+    with pytest.raises(OSError):
+        os.fstat(held[0])
+
+
+def test_store_initialization_closes_descriptor_when_chmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    descriptor: list[int] = []
+
+    def fail_chmod(fd: int, mode: int) -> None:
+        descriptor.append(fd)
+        raise OSError("simulated chmod failure")
+
+    monkeypatch.setattr(os, "fchmod", fail_chmod)
+    store = ConnectionStore(tmp_path / "state" / "database.sqlite3", Fernet.generate_key())
+    with pytest.raises(OSError, match="simulated chmod failure"):
+        store.initialize()
+    assert len(descriptor) == 1
+    with pytest.raises(OSError):
+        os.fstat(descriptor[0])
+
+
 def test_database_from_another_schema_version_is_refused(settings: Settings) -> None:
     _store(settings)
     with sqlite3.connect(settings.database_path) as database:

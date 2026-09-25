@@ -8,7 +8,8 @@ contract tests, and served OpenAPI documentation.
 
 ## Quick start
 
-Install Python 3.12, [uv](https://docs.astral.sh/uv/), and Docker Compose. From
+Install Python 3.12, [uv](https://docs.astral.sh/uv/), Docker Compose, and the
+OpenSSH client (`ssh-keygen` and `ssh-keyscan`). From
 the repository root, copy this single command:
 
 ```bash

@@ -204,8 +204,17 @@ PAD = "p" * MAX_PREVIEW_BYTES
         ('[{"a": 1} {"b": 2}, {"pad": "' + PAD + '"}]', "MALFORMED_FILE"),
         ('[{"a": "\\q"}, {"pad": "' + PAD + '"}]', "MALFORMED_FILE"),
         ('[{"pad": "' + PAD + '"}]', "PREVIEW_LIMIT_EXCEEDED"),
+        ('[{"pad": "' + "p" * (MAX_PREVIEW_BYTES - 17) + '","a":@}]', "MALFORMED_FILE"),
+        ('[{"pad": "' + "p" * (MAX_PREVIEW_BYTES - 19) + '","a":tru}]', "PREVIEW_LIMIT_EXCEEDED"),
     ],
-    ids=["bad-literal", "missing-comma", "bad-escape", "string-cut-by-budget"],
+    ids=[
+        "bad-literal",
+        "missing-comma",
+        "bad-escape",
+        "string-cut-by-budget",
+        "bad-tail-token",
+        "cut-tail-token",
+    ],
 )
 def test_json_past_the_budget_tells_errors_from_truncation(
     settings: Settings, tmp_path: Path, document: str, code: str

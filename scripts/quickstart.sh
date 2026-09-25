@@ -3,6 +3,13 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
+for tool in ssh-keygen ssh-keyscan; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    printf 'Quickstart requires the OpenSSH client (%s is missing).\n' "$tool" >&2
+    exit 1
+  fi
+done
+
 . scripts/env_file.sh
 . scripts/sftp_fixture_user.sh
 
