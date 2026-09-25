@@ -1,8 +1,79 @@
-"""Safe, transport-independent application errors."""
+"""Typed, transport-independent application errors and the HTTP status of each code."""
+
+from enum import StrEnum
+
+
+class ErrorCode(StrEnum):
+    """Stable error codes. Each code maps to exactly one HTTP status."""
+
+    INVALID_REQUEST = "INVALID_REQUEST"
+    INVALID_HOST_HEADER = "INVALID_HOST_HEADER"
+    CROSS_ORIGIN_REJECTED = "CROSS_ORIGIN_REJECTED"
+    INVALID_CONNECTION_SETTINGS = "INVALID_CONNECTION_SETTINGS"
+    INVALID_FILENAME = "INVALID_FILENAME"
+    SAME_FILE = "SAME_FILE"
+    UNSUPPORTED_PREVIEW_FORMAT = "UNSUPPORTED_PREVIEW_FORMAT"
+    MALFORMED_FILE = "MALFORMED_FILE"
+    PREVIEW_LIMIT_EXCEEDED = "PREVIEW_LIMIT_EXCEEDED"
+    CONNECTION_NOT_FOUND = "CONNECTION_NOT_FOUND"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    TRANSFER_NOT_FOUND = "TRANSFER_NOT_FOUND"
+    ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
+    METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    CONNECTION_EXISTS = "CONNECTION_EXISTS"
+    DESTINATION_EXISTS = "DESTINATION_EXISTS"
+    SFTP_AUTH_FAILED = "SFTP_AUTH_FAILED"
+    SFTP_HOST_KEY_REJECTED = "SFTP_HOST_KEY_REJECTED"
+    SFTP_OPERATION_FAILED = "SFTP_OPERATION_FAILED"
+    SFTP_UNAVAILABLE = "SFTP_UNAVAILABLE"
+    CONNECTION_ROOT_UNAVAILABLE = "CONNECTION_ROOT_UNAVAILABLE"
+    LOCAL_IO_ERROR = "LOCAL_IO_ERROR"
+    SOURCE_READ_FAILED = "SOURCE_READ_FAILED"
+    DESTINATION_WRITE_FAILED = "DESTINATION_WRITE_FAILED"
+    TRANSFER_INTERNAL_ERROR = "TRANSFER_INTERNAL_ERROR"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
+
+    @property
+    def http_status(self) -> int:
+        return _HTTP_STATUS[self]
+
+
+_HTTP_STATUS: dict[ErrorCode, int] = {
+    ErrorCode.INVALID_REQUEST: 422,
+    ErrorCode.INVALID_HOST_HEADER: 400,
+    ErrorCode.CROSS_ORIGIN_REJECTED: 403,
+    ErrorCode.INVALID_CONNECTION_SETTINGS: 400,
+    ErrorCode.INVALID_FILENAME: 400,
+    ErrorCode.SAME_FILE: 400,
+    ErrorCode.UNSUPPORTED_PREVIEW_FORMAT: 400,
+    ErrorCode.MALFORMED_FILE: 400,
+    ErrorCode.PREVIEW_LIMIT_EXCEEDED: 400,
+    ErrorCode.CONNECTION_NOT_FOUND: 404,
+    ErrorCode.FILE_NOT_FOUND: 404,
+    ErrorCode.TRANSFER_NOT_FOUND: 404,
+    ErrorCode.ROUTE_NOT_FOUND: 404,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
+    ErrorCode.CONNECTION_EXISTS: 409,
+    ErrorCode.DESTINATION_EXISTS: 409,
+    ErrorCode.SFTP_AUTH_FAILED: 502,
+    ErrorCode.SFTP_HOST_KEY_REJECTED: 502,
+    ErrorCode.SFTP_OPERATION_FAILED: 502,
+    ErrorCode.SFTP_UNAVAILABLE: 503,
+    ErrorCode.CONNECTION_ROOT_UNAVAILABLE: 503,
+    ErrorCode.LOCAL_IO_ERROR: 500,
+    ErrorCode.SOURCE_READ_FAILED: 500,
+    ErrorCode.DESTINATION_WRITE_FAILED: 500,
+    ErrorCode.TRANSFER_INTERNAL_ERROR: 500,
+    ErrorCode.INTERNAL_ERROR: 500,
+}
+
+_UNMAPPED = set(ErrorCode) - _HTTP_STATUS.keys()
+if _UNMAPPED:
+    raise RuntimeError(f"Error codes without an HTTP status: {sorted(_UNMAPPED)}")
 
 
 class DataBridgeError(Exception):
-    def __init__(self, code: str, message: str, transfer_id: str | None = None) -> None:
+    def __init__(self, code: ErrorCode, message: str, transfer_id: str | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message

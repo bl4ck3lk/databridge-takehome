@@ -17,7 +17,7 @@ from databridge.connectors.base import (
     is_stage_name,
     validate_filename,
 )
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import SFTPConnection
 
 
@@ -25,7 +25,7 @@ class _RejectUnknownHost(paramiko.MissingHostKeyPolicy):
     def missing_host_key(
         self, _client: paramiko.SSHClient, _hostname: str, _key: paramiko.PKey
     ) -> None:
-        raise DataBridgeError("SFTP_HOST_KEY_REJECTED", "SFTP host key is not trusted")
+        raise DataBridgeError(ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP host key is not trusted")
 
 
 class SFTPConnector:
@@ -46,7 +46,7 @@ class SFTPConnector:
                 client.load_host_keys(str(self.known_hosts_path))
             except (OSError, paramiko.SSHException) as exc:
                 raise DataBridgeError(
-                    "SFTP_HOST_KEY_REJECTED", "SFTP known-hosts file is missing or invalid"
+                    ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP known-hosts file is missing or invalid"
                 ) from exc
             client.set_missing_host_key_policy(_RejectUnknownHost())
             try:
@@ -66,17 +66,23 @@ class SFTPConnector:
                 raise
             except paramiko.BadHostKeyException as exc:
                 raise DataBridgeError(
-                    "SFTP_HOST_KEY_REJECTED", "SFTP host key does not match known-hosts"
+                    ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP host key does not match known-hosts"
                 ) from exc
             except paramiko.AuthenticationException as exc:
-                raise DataBridgeError("SFTP_AUTH_FAILED", "SFTP credentials were rejected") from exc
+                raise DataBridgeError(
+                    ErrorCode.SFTP_AUTH_FAILED, "SFTP credentials were rejected"
+                ) from exc
             except (OSError, socket.timeout, paramiko.SSHException) as exc:
-                raise DataBridgeError("SFTP_UNAVAILABLE", "SFTP server is unavailable") from exc
+                raise DataBridgeError(
+                    ErrorCode.SFTP_UNAVAILABLE, "SFTP server is unavailable"
+                ) from exc
             try:
                 sftp = client.open_sftp()
                 sftp.get_channel().settimeout(30)
             except (OSError, paramiko.SSHException) as exc:
-                raise DataBridgeError("SFTP_OPERATION_FAILED", "Cannot open SFTP session") from exc
+                raise DataBridgeError(
+                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP session"
+                ) from exc
             try:
                 yield sftp
             finally:
@@ -104,7 +110,7 @@ class SFTPConnector:
                     files.append(entry.filename)
             except OSError as exc:
                 raise DataBridgeError(
-                    "CONNECTION_ROOT_UNAVAILABLE", "SFTP root directory cannot be listed"
+                    ErrorCode.CONNECTION_ROOT_UNAVAILABLE, "SFTP root directory cannot be listed"
                 ) from exc
         return Listing(sorted(files), False)
 
@@ -116,8 +122,10 @@ class SFTPConnector:
                 stream = sftp.file(path, "rb")
             except OSError as exc:
                 if exc.errno == errno.ENOENT:
-                    raise DataBridgeError("FILE_NOT_FOUND", "File not found") from exc
-                raise DataBridgeError("SFTP_OPERATION_FAILED", "Cannot open SFTP file") from exc
+                    raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, "File not found") from exc
+                raise DataBridgeError(
+                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP file"
+                ) from exc
             try:
                 yield stream
             finally:
@@ -131,7 +139,9 @@ class SFTPConnector:
         except OSError as exc:
             if exc.errno == errno.ENOENT:
                 return False
-            raise DataBridgeError("SFTP_OPERATION_FAILED", "Cannot inspect SFTP file") from exc
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED, "Cannot inspect SFTP file"
+            ) from exc
 
     @contextmanager
     def write(self, filename: str, transfer_id: str, overwrite: bool) -> Iterator[BinaryIO]:
@@ -139,12 +149,14 @@ class SFTPConnector:
         stage = posixpath.join(self.root, f".{filename}.databridge-{transfer_id}.part")
         with self._session() as sftp:
             if not overwrite and self._exists(sftp, destination):
-                raise DataBridgeError("DESTINATION_EXISTS", "Destination file already exists")
+                raise DataBridgeError(
+                    ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
+                )
             try:
                 stream = sftp.file(stage, "wbx")
             except OSError as exc:
                 raise DataBridgeError(
-                    "SFTP_OPERATION_FAILED", "Cannot open SFTP staging file"
+                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP staging file"
                 ) from exc
             try:
                 try:
@@ -152,7 +164,9 @@ class SFTPConnector:
                 finally:
                     stream.close()
                 if not overwrite and self._exists(sftp, destination):
-                    raise DataBridgeError("DESTINATION_EXISTS", "Destination file already exists")
+                    raise DataBridgeError(
+                        ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
+                    )
                 try:
                     if overwrite:
                         sftp.posix_rename(stage, destination)
@@ -161,10 +175,10 @@ class SFTPConnector:
                 except OSError as exc:
                     if not overwrite and self._exists(sftp, destination):
                         raise DataBridgeError(
-                            "DESTINATION_EXISTS", "Destination file already exists"
+                            ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
                         ) from exc
                     raise DataBridgeError(
-                        "SFTP_OPERATION_FAILED", "Cannot publish SFTP file"
+                        ErrorCode.SFTP_OPERATION_FAILED, "Cannot publish SFTP file"
                     ) from exc
             finally:
                 try:

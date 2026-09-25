@@ -7,8 +7,8 @@ from typing import BinaryIO, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from support import client_for
 
-from databridge.api import create_app
 from databridge.config import Settings
 from databridge.connectors.base import CHUNK_SIZE, Listing
 from databridge.errors import DataBridgeError
@@ -42,7 +42,7 @@ def test_local_transfer_bytes_status_collision_and_overwrite(
     payload = bytes(range(256)) * (CHUNK_SIZE // 256) + b"last-byte"
     (source / "source.bin").write_bytes(payload)
 
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         _connection(client, "source", source)
         _connection(client, "target", target)
         completed = client.post("/transfers", json=_transfer("source", "target"))
@@ -74,7 +74,7 @@ def test_local_transfer_bytes_status_collision_and_overwrite(
 def test_transfer_rejects_same_file_and_reports_missing_source(
     settings: Settings, tmp_path: Path
 ) -> None:
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         _connection(client, "files", tmp_path)
         same = client.post(
             "/transfers",
@@ -166,7 +166,7 @@ def test_startup_marks_interrupted_transfer_failed(settings: Settings, tmp_path:
     request = TransferRequest.model_validate(_transfer("source", "destination"))
     store.start_transfer(transfer_id, request)
 
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         record = client.get(f"/transfers/{transfer_id}").json()
     assert record["status"] == "failed"
     assert record["failure_phase"] == "interruption"
@@ -180,7 +180,7 @@ def test_empty_file_transfer(settings: Settings, tmp_path: Path) -> None:
     source.mkdir()
     target.mkdir()
     (source / "source.bin").touch()
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         _connection(client, "source", source)
         _connection(client, "target", target)
         response = client.post("/transfers", json=_transfer("source", "target"))

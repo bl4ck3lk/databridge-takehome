@@ -1,26 +1,26 @@
-"""HTTP application entry point and error boundary."""
+"""HTTP application: routes, error mapping, and the OpenAPI contract."""
 
 import json
-import logging
-import os
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter
-from typing import Annotated
-from uuid import uuid4
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Query, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from databridge.config import Settings
 from databridge.connectors import connector_for
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import (
+    CONNECTION_TYPE_NAMES,
     ConnectionInput,
     ConnectionView,
     ErrorResponse,
+    FieldProblem,
     FileList,
     HealthcheckResult,
     LocalConnection,
@@ -29,167 +29,154 @@ from databridge.models import (
     TransferRequest,
 )
 from databridge.preview import preview
+from databridge.request_log import RequestLog
 from databridge.store import ConnectionStore
 from databridge.transfer import TransferService
+from databridge.web import RequestContextMiddleware, body_log_fields, error_response
 
-_HTTP_STATUS = {
-    "INVALID_CONNECTION_SETTINGS": 400,
-    "INVALID_FILENAME": 400,
-    "CONNECTION_NOT_FOUND": 404,
-    "FILE_NOT_FOUND": 404,
-    "CONNECTION_EXISTS": 409,
-    "DESTINATION_EXISTS": 409,
-    "CONNECTION_ROOT_UNAVAILABLE": 503,
-    "LOCAL_IO_ERROR": 500,
-    "SAME_FILE": 400,
-    "UNSUPPORTED_PREVIEW_FORMAT": 400,
-    "MALFORMED_FILE": 400,
-    "PREVIEW_LIMIT_EXCEEDED": 400,
-    "INVALID_REQUEST": 422,
-    "TRANSFER_NOT_FOUND": 404,
-    "SOURCE_READ_FAILED": 500,
-    "DESTINATION_WRITE_FAILED": 500,
-    "TRANSFER_INTERNAL_ERROR": 500,
-    "SFTP_AUTH_FAILED": 502,
-    "SFTP_HOST_KEY_REJECTED": 502,
-    "SFTP_OPERATION_FAILED": 502,
-    "SFTP_UNAVAILABLE": 503,
+_ALWAYS_POSSIBLE = (ErrorCode.INVALID_HOST_HEADER, ErrorCode.INTERNAL_ERROR)
+_STATE_CHANGE = (ErrorCode.CROSS_ORIGIN_REJECTED,)
+_SFTP_ACCESS = (
+    ErrorCode.SFTP_AUTH_FAILED,
+    ErrorCode.SFTP_HOST_KEY_REJECTED,
+    ErrorCode.SFTP_OPERATION_FAILED,
+    ErrorCode.SFTP_UNAVAILABLE,
+)
+_ROUTING_ERRORS = {
+    404: (ErrorCode.ROUTE_NOT_FOUND, "No route matches this path; see /docs for the API"),
+    405: (ErrorCode.METHOD_NOT_ALLOWED, "This route does not accept the request method"),
 }
+_LOCATION_PREFIXES = ("body", "query", "path")
+_REQUIREMENT_PREFIXES = ("Input should", "String should", "Value should")
 
 
-def _error_responses(*status_codes: int) -> dict[int, dict[str, object]]:
+def _error_responses(
+    *codes: ErrorCode, changes_state: bool = False
+) -> dict[int | str, dict[str, Any]]:
+    """Document every error status a route can return and the codes behind each status."""
+    grouped: dict[int, set[str]] = {}
+    for code in (*codes, *_ALWAYS_POSSIBLE, *(_STATE_CHANGE if changes_state else ())):
+        grouped.setdefault(code.http_status, set()).add(code.value)
     return {
-        code: {"model": ErrorResponse, "description": "DataBridge error"} for code in status_codes
+        status_code: {
+            "model": ErrorResponse,
+            "description": "Error codes: " + ", ".join(sorted(names)),
+        }
+        for status_code, names in sorted(grouped.items())
     }
 
 
-def _error_response(
-    status_code: int, code: str, message: str, transfer_id: str | None = None
-) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": {"code": code, "message": message, "transfer_id": transfer_id}},
-    )
+def _problem_text(message: str) -> str:
+    text = message.removeprefix("Value error, ")
+    for prefix in _REQUIREMENT_PREFIXES:
+        if text.startswith(prefix):
+            return "must" + text[len(prefix) :]
+    return text[:1].lower() + text[1:]
 
 
-def _log_fields(values: dict[str, object], allowed: tuple[str, ...]) -> dict[str, object]:
-    """Keep only known, scalar request fields; never copy a raw request body to logs."""
-    result: dict[str, object] = {}
-    for key in allowed:
-        value = values.get(key)
-        if isinstance(value, str):
-            result[key] = value[:512]
-        elif isinstance(value, (int, bool)):
-            result[key] = value
-    return result
-
-
-def _body_log_fields(body: object, route: str) -> dict[str, object]:
-    if not isinstance(body, dict):
-        return {}
-    if route == "/connections":
-        common = ("name", "type")
-        if body.get("type") == "local":
-            return _log_fields(body, (*common, "path"))
-        if body.get("type") == "sftp":
-            return _log_fields(body, (*common, "host", "port", "username", "root"))
-        return _log_fields(body, common)
-    if route == "/transfers":
-        return _log_fields(
-            body, ("source", "source_file", "destination", "destination_file", "overwrite")
+def _field_problem(error: Mapping[str, Any]) -> FieldProblem:
+    kind = error["type"]
+    if kind == "json_invalid":
+        return FieldProblem(field="request body", problem="is not valid JSON")
+    if kind in ("union_tag_invalid", "union_tag_not_found"):
+        return FieldProblem(
+            field="type", problem="must be one of: " + ", ".join(CONNECTION_TYPE_NAMES)
         )
-    return {}
+    location = list(error["loc"])
+    if location and location[0] in _LOCATION_PREFIXES:
+        location = location[1:]
+    if location and location[0] in CONNECTION_TYPE_NAMES:
+        location = location[1:]
+    field = ".".join(str(part) for part in location) or "request body"
+    if kind == "missing":
+        return FieldProblem(field=field, problem="is required")
+    if kind == "extra_forbidden":
+        return FieldProblem(field=field, problem="is not a recognized field")
+    return FieldProblem(field=field, problem=_problem_text(str(error["msg"])))
+
+
+def _openapi_without_default_validation(application: FastAPI) -> Callable[[], dict[str, Any]]:
+    """Publish only declared responses; FastAPI adds a 422 to every route with parameters."""
+
+    def openapi() -> dict[str, Any]:
+        if application.openapi_schema is None:
+            schema = get_openapi(
+                title=application.title, version=application.version, routes=application.routes
+            )
+            for path_item in schema["paths"].values():
+                for operation in path_item.values():
+                    responses = operation["responses"]
+                    if "HTTPValidationError" in json.dumps(responses.get("422", {})):
+                        del responses["422"]
+            component_schemas = schema.get("components", {}).get("schemas", {})
+            component_schemas.pop("HTTPValidationError", None)
+            component_schemas.pop("ValidationError", None)
+            application.openapi_schema = schema
+        return application.openapi_schema
+
+    return openapi
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build an app instance so tests can control its lifecycle and settings."""
 
     @asynccontextmanager
-    async def lifespan(application: FastAPI):
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         effective = settings if settings is not None else Settings.from_env()
         store = ConnectionStore(effective.database_path, effective.encryption_key)
         store.initialize()
+        request_log = RequestLog(effective.request_log_path)
+        request_log.open()
         application.state.store = store
         application.state.settings = effective
-        log_path = effective.database_path.with_suffix(".requests.jsonl")
-        descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(descriptor, "a", encoding="utf-8") as request_log:
-            os.chmod(log_path, 0o600)
-            application.state.request_log = request_log
+        application.state.request_log = request_log
+        try:
             yield
+        finally:
+            request_log.close()
 
     application = FastAPI(
         title="DataBridge",
         version="0.1.0",
         lifespan=lifespan,
-        responses={422: {"model": ErrorResponse, "description": "Invalid request"}},
+        strict_content_type=True,
     )
-
-    @application.middleware("http")
-    async def log_request(request: Request, call_next):
-        started = perf_counter()
-        request_id = str(uuid4())
-        request.state.request_id = request_id
-        status_code = 500
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-            response.headers["X-Request-ID"] = request_id
-            return response
-        except Exception as exc:
-            request.state.error_type = type(exc).__name__
-            raise
-        finally:
-            route = request.scope.get("route")
-            event = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "request_id": request_id,
-                "method": request.method,
-                "route": route.path if route else None,
-                "status_code": status_code,
-                "duration_ms": round((perf_counter() - started) * 1000, 2),
-            }
-            if request.path_params:
-                event["path_params"] = _log_fields(
-                    request.path_params, ("name", "filename", "transfer_id")
-                )
-            if "limit" in request.query_params:
-                event["query_params"] = _log_fields(dict(request.query_params), ("limit",))
-            if params := getattr(request.state, "body_params", None):
-                event["body_params"] = params
-            for key in ("error_code", "error_type", "transfer_id"):
-                if value := getattr(request.state, key, None):
-                    event[key] = value
-            try:
-                request.app.state.request_log.write(json.dumps(event, separators=(",", ":")) + "\n")
-                request.app.state.request_log.flush()
-            except OSError:
-                logging.getLogger("uvicorn.error").error("request_log_write_failed")
+    application.add_middleware(RequestContextMiddleware)
+    application.openapi = _openapi_without_default_validation(application)  # type: ignore[method-assign]
 
     @application.exception_handler(DataBridgeError)
     def domain_error(request: Request, exc: DataBridgeError) -> JSONResponse:
         request.state.error_code = exc.code
         request.state.transfer_id = exc.transfer_id
-        return _error_response(_HTTP_STATUS[exc.code], exc.code, exc.message, exc.transfer_id)
+        return error_response(exc.code, exc.message, transfer_id=exc.transfer_id)
 
     @application.exception_handler(RequestValidationError)
     def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        request.state.error_code = "INVALID_REQUEST"
         route = request.scope.get("route")
-        request.state.body_params = _body_log_fields(exc.body, route.path if route else "")
-        first = exc.errors()[0]
-        field = next(
-            (part for part in reversed(first["loc"]) if isinstance(part, str) and part != "body"),
-            "request",
+        request.state.error_code = ErrorCode.INVALID_REQUEST
+        request.state.body_params = body_log_fields(exc.body, route.path if route else "")
+        details = [_field_problem(error) for error in exc.errors()]
+        message = "; ".join(f"{detail.field} {detail.problem}" for detail in details)
+        return error_response(ErrorCode.INVALID_REQUEST, message, details=details)
+
+    @application.exception_handler(StarletteHTTPException)
+    def routing_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+        code, message = _ROUTING_ERRORS.get(
+            exc.status_code, (ErrorCode.INTERNAL_ERROR, "Unexpected HTTP error")
         )
-        problem = "is required" if first["type"] == "missing" else "is invalid"
-        return _error_response(422, "INVALID_REQUEST", f"{field} {problem}")
+        request.state.error_code = code
+        return error_response(code, message, headers=exc.headers)
 
     @application.post(
         "/connections",
         response_model=ConnectionView,
         status_code=status.HTTP_201_CREATED,
-        responses=_error_responses(400, 409),
+        responses=_error_responses(
+            ErrorCode.INVALID_REQUEST,
+            ErrorCode.INVALID_CONNECTION_SETTINGS,
+            ErrorCode.CONNECTION_EXISTS,
+            changes_state=True,
+        ),
     )
     def create_connection(
         item: Annotated[
@@ -226,7 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ],
         request: Request,
     ) -> ConnectionView:
-        request.state.body_params = _body_log_fields(
+        request.state.body_params = body_log_fields(
             item.model_dump(exclude={"password"}), "/connections"
         )
         if isinstance(item, LocalConnection):
@@ -236,33 +223,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 path = requested_path.resolve(strict=True)
             except FileExistsError as exc:
                 raise DataBridgeError(
-                    "INVALID_CONNECTION_SETTINGS", "Local path is not a directory"
+                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Local path is not a directory"
                 ) from exc
             except (OSError, RuntimeError) as exc:
                 raise DataBridgeError(
-                    "INVALID_CONNECTION_SETTINGS", "Cannot create local directory"
+                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Cannot create local directory"
                 ) from exc
             if not path.is_dir():
                 raise DataBridgeError(
-                    "INVALID_CONNECTION_SETTINGS", "Local path is not a directory"
+                    ErrorCode.INVALID_CONNECTION_SETTINGS, "Local path is not a directory"
                 )
             item = item.model_copy(update={"path": str(path)})
         return request.app.state.store.create(item)
 
-    @application.get("/connections", response_model=list[ConnectionView])
+    @application.get(
+        "/connections", response_model=list[ConnectionView], responses=_error_responses()
+    )
     def list_connections(request: Request) -> list[ConnectionView]:
         return request.app.state.store.list_public()
 
     @application.get(
-        "/connections/{name}", response_model=ConnectionView, responses=_error_responses(404)
+        "/connections/{name}",
+        response_model=ConnectionView,
+        responses=_error_responses(ErrorCode.CONNECTION_NOT_FOUND),
     )
     def get_connection(name: str, request: Request) -> ConnectionView:
         return request.app.state.store.get_public(name)
 
+    listing_errors = (
+        ErrorCode.CONNECTION_NOT_FOUND,
+        ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
+        *_SFTP_ACCESS,
+    )
+
     @application.get(
         "/connections/{name}/files",
         response_model=FileList,
-        responses=_error_responses(404, 500, 502, 503),
+        responses=_error_responses(*listing_errors),
     )
     def list_files(name: str, request: Request) -> FileList:
         item = request.app.state.store.get(name)
@@ -273,7 +270,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.post(
         "/connections/{name}/healthcheck",
         response_model=HealthcheckResult,
-        responses=_error_responses(404, 500, 502, 503),
+        responses=_error_responses(*listing_errors, changes_state=True),
     )
     def healthcheck(name: str, request: Request) -> HealthcheckResult:
         item = request.app.state.store.get(name)
@@ -284,7 +281,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get(
         "/connections/{name}/files/{filename}/head",
         response_model=PreviewResult,
-        responses=_error_responses(400, 404, 500, 502, 503),
+        responses=_error_responses(
+            ErrorCode.INVALID_REQUEST,
+            ErrorCode.CONNECTION_NOT_FOUND,
+            ErrorCode.FILE_NOT_FOUND,
+            ErrorCode.INVALID_FILENAME,
+            ErrorCode.UNSUPPORTED_PREVIEW_FORMAT,
+            ErrorCode.MALFORMED_FILE,
+            ErrorCode.PREVIEW_LIMIT_EXCEEDED,
+            ErrorCode.LOCAL_IO_ERROR,
+            *_SFTP_ACCESS,
+        ),
     )
     def preview_file(
         name: str, filename: str, request: Request, limit: int = Query(default=5, ge=1, le=100)
@@ -298,7 +305,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=TransferRecord,
         status_code=status.HTTP_201_CREATED,
         responses={
-            **_error_responses(400, 404, 409, 500, 502, 503),
+            **_error_responses(
+                ErrorCode.INVALID_REQUEST,
+                ErrorCode.INVALID_FILENAME,
+                ErrorCode.SAME_FILE,
+                ErrorCode.CONNECTION_NOT_FOUND,
+                ErrorCode.FILE_NOT_FOUND,
+                ErrorCode.DESTINATION_EXISTS,
+                ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
+                ErrorCode.LOCAL_IO_ERROR,
+                ErrorCode.SOURCE_READ_FAILED,
+                ErrorCode.DESTINATION_WRITE_FAILED,
+                ErrorCode.TRANSFER_INTERNAL_ERROR,
+                *_SFTP_ACCESS,
+                changes_state=True,
+            ),
             201: {
                 "description": (
                     "Transfer completed. The full response also includes null "
@@ -356,7 +377,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ],
         request: Request,
     ) -> TransferRecord:
-        request.state.body_params = _body_log_fields(item.model_dump(), "/transfers")
+        request.state.body_params = body_log_fields(item.model_dump(), "/transfers")
         service = TransferService(
             request.app.state.store,
             lambda connection: connector_for(
@@ -370,7 +391,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @application.get(
         "/transfers/{transfer_id}",
         response_model=TransferRecord,
-        responses=_error_responses(404),
+        responses=_error_responses(ErrorCode.TRANSFER_NOT_FOUND),
     )
     def get_transfer(transfer_id: str, request: Request) -> TransferRecord:
         return request.app.state.store.get_transfer(transfer_id)

@@ -1,8 +1,10 @@
 """The small public connection contract."""
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, Field, SecretStr, StringConstraints
+
+from databridge.errors import ErrorCode
 
 ConnectionName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
 
@@ -24,6 +26,10 @@ class SFTPConnection(BaseModel):
 
 
 ConnectionInput = Annotated[LocalConnection | SFTPConnection, Field(discriminator="type")]
+CONNECTION_TYPE_NAMES: tuple[str, ...] = tuple(
+    get_args(model.model_fields["type"].annotation)[0]
+    for model in (LocalConnection, SFTPConnection)
+)
 
 
 class LocalConnectionView(BaseModel):
@@ -55,10 +61,16 @@ class HealthcheckResult(BaseModel):
     reachable: Literal[True]
 
 
+class FieldProblem(BaseModel):
+    field: str
+    problem: str
+
+
 class ErrorDetail(BaseModel):
-    code: str
+    code: ErrorCode
     message: str
-    transfer_id: str | None
+    transfer_id: str | None = None
+    details: list[FieldProblem] | None = None
 
 
 class ErrorResponse(BaseModel):

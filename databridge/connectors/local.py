@@ -12,7 +12,7 @@ from databridge.connectors.base import (
     is_stage_name,
     validate_filename,
 )
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 
 
 class LocalConnector:
@@ -23,7 +23,9 @@ class LocalConnector:
         validate_filename(filename)
         candidate = self.root / filename
         if not candidate.resolve().is_relative_to(self.root.resolve()):
-            raise DataBridgeError("INVALID_FILENAME", "Filename escapes the connection root")
+            raise DataBridgeError(
+                ErrorCode.INVALID_FILENAME, "Filename escapes the connection root"
+            )
         return candidate
 
     def list_files(self) -> Listing:
@@ -46,7 +48,7 @@ class LocalConnector:
                     files.append(entry.name)
         except OSError as exc:
             raise DataBridgeError(
-                "CONNECTION_ROOT_UNAVAILABLE", "Local directory unavailable"
+                ErrorCode.CONNECTION_ROOT_UNAVAILABLE, "Local directory unavailable"
             ) from exc
         return Listing(sorted(files), False)
 
@@ -56,9 +58,9 @@ class LocalConnector:
         try:
             stream = path.open("rb")
         except FileNotFoundError as exc:
-            raise DataBridgeError("FILE_NOT_FOUND", "File not found") from exc
+            raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, "File not found") from exc
         except OSError as exc:
-            raise DataBridgeError("LOCAL_IO_ERROR", "Cannot read local file") from exc
+            raise DataBridgeError(ErrorCode.LOCAL_IO_ERROR, "Cannot read local file") from exc
         try:
             yield stream
         finally:
@@ -68,12 +70,14 @@ class LocalConnector:
     def write(self, filename: str, transfer_id: str, overwrite: bool) -> Iterator[BinaryIO]:
         destination = self._file(filename)
         if destination.exists() and not overwrite:
-            raise DataBridgeError("DESTINATION_EXISTS", "Destination file already exists")
+            raise DataBridgeError(ErrorCode.DESTINATION_EXISTS, "Destination file already exists")
         stage = self.root / f".{filename}.databridge-{transfer_id}.part"
         try:
             stream = stage.open("xb")
         except OSError as exc:
-            raise DataBridgeError("LOCAL_IO_ERROR", "Cannot open destination staging file") from exc
+            raise DataBridgeError(
+                ErrorCode.LOCAL_IO_ERROR, "Cannot open destination staging file"
+            ) from exc
         try:
             try:
                 yield stream
@@ -86,9 +90,11 @@ class LocalConnector:
                     os.link(stage, destination)
             except FileExistsError as exc:
                 raise DataBridgeError(
-                    "DESTINATION_EXISTS", "Destination file already exists"
+                    ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
                 ) from exc
             except OSError as exc:
-                raise DataBridgeError("LOCAL_IO_ERROR", "Cannot publish local file") from exc
+                raise DataBridgeError(
+                    ErrorCode.LOCAL_IO_ERROR, "Cannot publish local file"
+                ) from exc
         finally:
             stage.unlink(missing_ok=True)

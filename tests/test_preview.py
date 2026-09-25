@@ -2,9 +2,8 @@
 
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from support import client_for
 
-from databridge.api import create_app
 from databridge.config import Settings
 from databridge.preview import MAX_PREVIEW_BYTES
 
@@ -12,7 +11,7 @@ FIXTURES = Path(__file__).resolve().parents[1] / "instructions"
 
 
 def test_supplied_csv_and_json_preview(settings: Settings) -> None:
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         created = client.post(
             "/connections", json={"name": "fixtures", "type": "local", "path": str(FIXTURES)}
         )
@@ -59,7 +58,7 @@ def test_preview_inference_empty_mixed_and_malformed(settings: Settings, tmp_pat
     (tmp_path / "bad.csv").write_text("a,a\n1,2\n")
     (tmp_path / "bad-number.json").write_text('[{"x":NaN}]')
     (tmp_path / "other.txt").write_text("text")
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         client.post("/connections", json={"name": "files", "type": "local", "path": str(tmp_path)})
         csv_preview = client.get("/connections/files/files/mixed.csv/head?limit=10")
         json_preview = client.get("/connections/files/files/mixed.json/head?limit=10")
@@ -100,7 +99,7 @@ def test_preview_inference_empty_mixed_and_malformed(settings: Settings, tmp_pat
 
 def test_preview_rejects_a_record_beyond_byte_budget(settings: Settings, tmp_path: Path) -> None:
     (tmp_path / "wide.csv").write_bytes(b"field\n" + b"x" * MAX_PREVIEW_BYTES + b"\n")
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         client.post("/connections", json={"name": "files", "type": "local", "path": str(tmp_path)})
         response = client.get("/connections/files/files/wide.csv/head")
     assert response.status_code == 400
@@ -113,7 +112,7 @@ def test_preview_accepts_exact_byte_budget_without_final_newline(
     prefix = b"field\n" + (b"x" * 10_000 + b"\n") * 99
     final_row = b"y" * (MAX_PREVIEW_BYTES - len(prefix))
     (tmp_path / "exact.csv").write_bytes(prefix + final_row)
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         client.post("/connections", json={"name": "files", "type": "local", "path": str(tmp_path)})
         response = client.get("/connections/files/files/exact.csv/head?limit=100")
     assert response.status_code == 200

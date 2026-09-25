@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from support import client_for
 
 from databridge.api import create_app
 from databridge.config import Settings
@@ -17,7 +18,7 @@ def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path:
     root.mkdir()
     (root / "customers.csv").write_text("id\n1\n")
     (root / "subdirectory").mkdir()
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         created = client.post(
             "/connections", json={"name": "local_data", "type": "local", "path": str(root)}
         )
@@ -32,7 +33,7 @@ def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path:
         "truncated": False,
     }
     assert health.json() == {"connection": "local_data", "reachable": True}
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         assert client.get("/connections/local_data").json() == created.json()
 
 
@@ -47,7 +48,7 @@ def test_encrypted_sftp_password_is_never_in_read_responses(settings: Settings) 
         "password": password,
         "root": "data",
     }
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         created = client.post("/connections", json=request)
         fetched = client.get("/connections/remote_server")
         listed = client.get("/connections")
@@ -66,13 +67,13 @@ def test_encrypted_sftp_password_is_never_in_read_responses(settings: Settings) 
     assert password not in row[1]
     assert row[1] != password
 
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         assert client.get("/connections/remote_server").json() == created.json()
         assert client.app.state.store.get("remote_server").password.get_secret_value() == password
 
 
 def test_wrong_key_fails_startup_even_without_sftp_connections(settings: Settings) -> None:
-    with TestClient(create_app(settings)):
+    with client_for(settings):
         pass
 
     wrong = Settings(
@@ -81,7 +82,7 @@ def test_wrong_key_fails_startup_even_without_sftp_connections(settings: Setting
         known_hosts_path=settings.known_hosts_path,
     )
     with pytest.raises(RuntimeError, match="does not match the database"):
-        with TestClient(create_app(wrong)):
+        with client_for(wrong):
             pass
 
 
@@ -95,7 +96,7 @@ def test_missing_key_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_connection_errors_are_structured(settings: Settings, tmp_path: Path) -> None:
     not_a_directory = tmp_path / "file.txt"
     not_a_directory.write_text("content")
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         missing = client.get("/connections/no_such_connection")
         invalid_path = client.post(
             "/connections",
@@ -125,7 +126,7 @@ def test_connection_errors_are_structured(settings: Settings, tmp_path: Path) ->
 
 def test_local_connection_creates_missing_directory(settings: Settings, tmp_path: Path) -> None:
     root = tmp_path / "new" / "nested"
-    with TestClient(create_app(settings)) as client:
+    with client_for(settings) as client:
         created = client.post(
             "/connections", json={"name": "output", "type": "local", "path": str(root)}
         )

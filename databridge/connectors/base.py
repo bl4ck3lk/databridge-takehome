@@ -5,7 +5,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 
 MAX_LIST_RESULTS = 1_000
 MAX_LIST_SCAN = 10_000
@@ -28,7 +28,7 @@ def validate_filename(filename: str) -> str:
         or "\x00" in filename
         or _STAGE_NAME.fullmatch(filename)
     ):
-        raise DataBridgeError("INVALID_FILENAME", "Filename must name one file at the root")
+        raise DataBridgeError(ErrorCode.INVALID_FILENAME, "Filename must name one file at the root")
     return filename
 
 

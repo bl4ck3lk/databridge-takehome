@@ -9,7 +9,7 @@ from typing import Iterator
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import (
     ConnectionView,
     LocalConnection,
@@ -118,7 +118,9 @@ class ConnectionStore:
                     (item.name, item.type, json.dumps(settings), ciphertext),
                 )
         except sqlite3.IntegrityError as exc:
-            raise DataBridgeError("CONNECTION_EXISTS", "Connection name already exists") from exc
+            raise DataBridgeError(
+                ErrorCode.CONNECTION_EXISTS, "Connection name already exists"
+            ) from exc
         return self._view(item.name, item.type, settings)
 
     def get(self, name: str) -> LocalConnection | SFTPConnection:
@@ -129,7 +131,7 @@ class ConnectionStore:
                 (name,),
             ).fetchone()
         if row is None:
-            raise DataBridgeError("CONNECTION_NOT_FOUND", "Connection not found")
+            raise DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found")
         settings = json.loads(row["settings_json"])
         if row["type"] == "local":
             return LocalConnection(name=name, type="local", **settings)
@@ -145,7 +147,7 @@ class ConnectionStore:
                 "SELECT name, type, settings_json FROM connections WHERE name = ?", (name,)
             ).fetchone()
         if row is None:
-            raise DataBridgeError("CONNECTION_NOT_FOUND", "Connection not found")
+            raise DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, "Connection not found")
         return self._view(row["name"], row["type"], json.loads(row["settings_json"]))
 
     def list_public(self) -> list[ConnectionView]:
@@ -208,5 +210,5 @@ class ConnectionStore:
                 "SELECT * FROM transfers WHERE id = ?", (transfer_id,)
             ).fetchone()
         if row is None:
-            raise DataBridgeError("TRANSFER_NOT_FOUND", "Transfer not found")
+            raise DataBridgeError(ErrorCode.TRANSFER_NOT_FOUND, "Transfer not found")
         return TransferRecord.model_validate(dict(row))

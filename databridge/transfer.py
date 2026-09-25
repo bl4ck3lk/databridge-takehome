@@ -5,7 +5,7 @@ from collections.abc import Callable
 from uuid import uuid4
 
 from databridge.connectors.base import CHUNK_SIZE, Connector, validate_filename
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import LocalConnection, SFTPConnection, TransferRecord, TransferRequest
 from databridge.store import ConnectionStore
 
@@ -25,7 +25,9 @@ class TransferService:
             request.source == request.destination
             and request.source_file == request.destination_file
         ):
-            raise DataBridgeError("SAME_FILE", "Source and destination identify the same file")
+            raise DataBridgeError(
+                ErrorCode.SAME_FILE, "Source and destination identify the same file"
+            )
 
         transfer_id = str(uuid4())
         self.store.start_transfer(transfer_id, request)
@@ -50,7 +52,8 @@ class TransferService:
                         written = writer.write(chunk)
                         if written is not None and written != len(chunk):
                             raise DataBridgeError(
-                                "DESTINATION_WRITE_FAILED", "Destination accepted a partial chunk"
+                                ErrorCode.DESTINATION_WRITE_FAILED,
+                                "Destination accepted a partial chunk",
                             )
                         copied += len(chunk)
                     phase = "finalization"
@@ -60,11 +63,11 @@ class TransferService:
             raise DataBridgeError(exc.code, exc.message, transfer_id) from exc
         except Exception as exc:
             if phase == "source_read":
-                code, message = "SOURCE_READ_FAILED", "Cannot read source file"
+                code, message = ErrorCode.SOURCE_READ_FAILED, "Cannot read source file"
             elif phase == "destination_write":
-                code, message = "DESTINATION_WRITE_FAILED", "Cannot write destination file"
+                code, message = ErrorCode.DESTINATION_WRITE_FAILED, "Cannot write destination file"
             else:
-                code, message = "TRANSFER_INTERNAL_ERROR", "Transfer could not be completed"
+                code, message = ErrorCode.TRANSFER_INTERNAL_ERROR, "Transfer could not be completed"
             self.store.fail_transfer(transfer_id, copied, phase, message)
             logger.error(
                 "transfer_failed id=%s phase=%s exception_type=%s",

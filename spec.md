@@ -55,19 +55,23 @@ Use JSON requests and responses. Names and paths below are proposed public route
 
 The service does not need asynchronous jobs for this exercise. A transfer request finishes when the copy and destination finalization finish. Status transitions are `running` to `completed` or `failed`. Persist the initial record before I/O and persist the terminal state even when an expected connector error occurs. An error response includes the transfer ID so the failed record can be inspected. Timestamps use UTC ISO 8601. `bytes_copied` counts bytes successfully written to the staged destination; a nonzero value on failure does not mean the final destination was published. Count bytes rather than rows because a data-agnostic copy never parses records. Record a safe failure phase such as source connection, destination connection, copy, or finalization. With the documented one-process runtime, startup marks records left `running` as `failed` with an interruption reason; another service process must not share that database concurrently.
 
-Errors use `{"error":{"code":"FILE_NOT_FOUND","message":"File not found","transfer_id":null}}`; `transfer_id` is set for a failed transfer request after its record is created. Use these stable codes and statuses:
+Every non-2xx response uses `{"error":{"code":"FILE_NOT_FOUND","message":"File not found","transfer_id":null,"details":null}}`, including unknown routes, unsupported methods, and unexpected server failures. `transfer_id` is set for a failed transfer request after its record is created. For `INVALID_REQUEST`, `details` lists every invalid field as `{"field": ..., "problem": ...}`, and the problem states the violated constraint. Each code maps to exactly one status; `databridge/errors.py` owns that mapping, and OpenAPI publishes the codes as an enum. Use these stable codes and statuses:
 
 | HTTP status | Codes |
 | --- | --- |
 | 422 | `INVALID_REQUEST` for malformed request shape or field types |
-| 400 | `INVALID_CONNECTION_SETTINGS`, `INVALID_FILENAME`, `SAME_FILE`, `UNSUPPORTED_PREVIEW_FORMAT`, `MALFORMED_FILE`, `PREVIEW_LIMIT_EXCEEDED` |
-| 404 | `CONNECTION_NOT_FOUND`, `FILE_NOT_FOUND`, `TRANSFER_NOT_FOUND` |
+| 400 | `INVALID_HOST_HEADER`, `INVALID_CONNECTION_SETTINGS`, `INVALID_FILENAME`, `SAME_FILE`, `UNSUPPORTED_PREVIEW_FORMAT`, `MALFORMED_FILE`, `PREVIEW_LIMIT_EXCEEDED` |
+| 403 | `CROSS_ORIGIN_REJECTED` |
+| 404 | `CONNECTION_NOT_FOUND`, `FILE_NOT_FOUND`, `TRANSFER_NOT_FOUND`, `ROUTE_NOT_FOUND` |
+| 405 | `METHOD_NOT_ALLOWED` |
 | 409 | `CONNECTION_EXISTS`, `DESTINATION_EXISTS` |
 | 502 | `SFTP_AUTH_FAILED`, `SFTP_HOST_KEY_REJECTED`, `SFTP_OPERATION_FAILED` |
 | 503 | `SFTP_UNAVAILABLE`, `CONNECTION_ROOT_UNAVAILABLE` |
-| 500 | `LOCAL_IO_ERROR`, `SOURCE_READ_FAILED`, `DESTINATION_WRITE_FAILED`, `TRANSFER_INTERNAL_ERROR` |
+| 500 | `LOCAL_IO_ERROR`, `SOURCE_READ_FAILED`, `DESTINATION_WRITE_FAILED`, `TRANSFER_INTERNAL_ERROR`, `INTERNAL_ERROR` |
 
-Avoid raw stack traces and secrets in error messages or logs. A remote authentication failure must not be reported as failure of the API caller's authentication. Keep the error mapper in the API boundary and raise typed domain/connector errors below it. Log one JSON event per HTTP request beside the SQLite database (default `state/databridge.requests.jsonl`), with mode 0600. Include the route template, request ID, status, duration, relevant path/query parameters, and allowlisted connection or transfer fields. Never log passwords, keys, raw bodies, or arbitrary query parameters. Return the request ID in the `X-Request-ID` response header.
+Avoid raw stack traces and secrets in error messages or logs. A remote authentication failure must not be reported as failure of the API caller's authentication. Keep the error mapper in the API boundary and raise typed domain/connector errors below it. Log one JSON event per HTTP request beside the SQLite database (default `state/databridge.requests.jsonl`), with mode 0600; rotate the log at 10 MiB and keep three owner-only backups. Include the route template, request ID, status, duration, relevant path/query parameters, and allowlisted connection or transfer fields. Never log passwords, keys, raw bodies, or arbitrary query parameters. Return the request ID in the `X-Request-ID` header of every response, including errors that no route handles.
+
+**Browser boundary.** The API has no caller authentication, so web pages must not be able to use it. The service answers only requests whose `Host` header names an allowed local name (`127.0.0.1`, `localhost`, or `::1`; `DATABRIDGE_ALLOWED_HOSTS` overrides the list), which defeats DNS rebinding. A `POST`, `PUT`, `PATCH`, or `DELETE` request that carries `Sec-Fetch-Site: cross-site` or an `Origin` other than the service's own origin fails with `CROSS_ORIGIN_REJECTED`. JSON bodies require a JSON `Content-Type`, so a cross-site "simple" request cannot submit one. Clients such as curl send no `Origin` and are not affected.
 
 ## Design boundaries
 

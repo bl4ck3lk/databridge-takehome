@@ -11,7 +11,7 @@ from pathlib import PurePath
 from typing import Any, Literal
 
 from databridge.connectors.base import Connector, validate_filename
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import PreviewResult
 
 MAX_PREVIEW_BYTES = 1_048_576
@@ -20,7 +20,7 @@ InferredType = Literal["string", "integer", "float", "boolean", "date"]
 _INTEGER = re.compile(r"^[+-]?\d+$")
 
 
-def _failure(code: str, message: str) -> DataBridgeError:
+def _failure(code: ErrorCode, message: str) -> DataBridgeError:
     return DataBridgeError(code, message)
 
 
@@ -32,7 +32,7 @@ def _read_prefix(connector: Connector, filename: str) -> tuple[str, bool]:
         decoder = codecs.getincrementaldecoder("utf-8-sig")()
         return decoder.decode(data, final=not at_limit), at_limit
     except UnicodeDecodeError as exc:
-        raise _failure("MALFORMED_FILE", "Preview is not valid UTF-8") from exc
+        raise _failure(ErrorCode.MALFORMED_FILE, "Preview is not valid UTF-8") from exc
 
 
 def _csv_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, str]]:
@@ -43,33 +43,33 @@ def _csv_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, str]]:
         reader = csv.reader(lines, strict=True)
         header = next(reader, None)
         if not header or any(not field for field in header) or len(set(header)) != len(header):
-            raise _failure("MALFORMED_FILE", "CSV must have a unique, nonempty header")
+            raise _failure(ErrorCode.MALFORMED_FILE, "CSV must have a unique, nonempty header")
         rows: list[dict[str, str]] = []
         for values in reader:
             if len(values) != len(header):
-                raise _failure("MALFORMED_FILE", "CSV row does not match its header")
+                raise _failure(ErrorCode.MALFORMED_FILE, "CSV row does not match its header")
             rows.append(dict(zip(header, values, strict=True)))
             if len(rows) == limit:
                 break
     except csv.Error as exc:
-        code = "PREVIEW_LIMIT_EXCEEDED" if at_limit else "MALFORMED_FILE"
+        code = ErrorCode.PREVIEW_LIMIT_EXCEEDED if at_limit else ErrorCode.MALFORMED_FILE
         raise _failure(code, "CSV preview cannot be parsed within the byte limit") from exc
     if at_limit and len(rows) < limit:
-        raise _failure("PREVIEW_LIMIT_EXCEEDED", "CSV preview exceeds the byte limit")
+        raise _failure(ErrorCode.PREVIEW_LIMIT_EXCEEDED, "CSV preview exceeds the byte limit")
     return rows
 
 
 def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
     def reject_constant(_value: str) -> None:
-        raise _failure("MALFORMED_FILE", "JSON contains a nonstandard numeric value")
+        raise _failure(ErrorCode.MALFORMED_FILE, "JSON contains a nonstandard numeric value")
 
     if not at_limit:
         try:
             document = json.loads(text, parse_constant=reject_constant)
         except json.JSONDecodeError as exc:
-            raise _failure("MALFORMED_FILE", "JSON file is malformed") from exc
+            raise _failure(ErrorCode.MALFORMED_FILE, "JSON file is malformed") from exc
         if not isinstance(document, list) or any(not isinstance(row, dict) for row in document):
-            raise _failure("MALFORMED_FILE", "JSON preview expects an array of objects")
+            raise _failure(ErrorCode.MALFORMED_FILE, "JSON preview expects an array of objects")
         return document[:limit]
 
     decoder = json.JSONDecoder(parse_constant=reject_constant)
@@ -81,12 +81,12 @@ def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
             position += 1
 
     def incomplete() -> DataBridgeError:
-        code = "PREVIEW_LIMIT_EXCEEDED" if at_limit else "MALFORMED_FILE"
+        code = ErrorCode.PREVIEW_LIMIT_EXCEEDED if at_limit else ErrorCode.MALFORMED_FILE
         return _failure(code, "JSON preview cannot be parsed within the byte limit")
 
     skip_space()
     if position >= len(text) or text[position] != "[":
-        raise _failure("MALFORMED_FILE", "JSON preview expects an array of objects")
+        raise _failure(ErrorCode.MALFORMED_FILE, "JSON preview expects an array of objects")
     position += 1
     rows: list[dict[str, Any]] = []
     after_comma = False
@@ -96,18 +96,18 @@ def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
             raise incomplete()
         if text[position] == "]":
             if after_comma:
-                raise _failure("MALFORMED_FILE", "JSON array has a trailing comma")
+                raise _failure(ErrorCode.MALFORMED_FILE, "JSON array has a trailing comma")
             position += 1
             skip_space()
             if position != len(text):
-                raise _failure("MALFORMED_FILE", "JSON has trailing content")
+                raise _failure(ErrorCode.MALFORMED_FILE, "JSON has trailing content")
             return rows
         try:
             item, position = decoder.raw_decode(text, position)
         except json.JSONDecodeError as exc:
             raise incomplete() from exc
         if not isinstance(item, dict):
-            raise _failure("MALFORMED_FILE", "JSON array entries must be objects")
+            raise _failure(ErrorCode.MALFORMED_FILE, "JSON array entries must be objects")
         rows.append(item)
         after_comma = False
         skip_space()
@@ -117,14 +117,14 @@ def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
             raise incomplete()
         delimiter = text[position]
         if delimiter not in {",", "]"}:
-            raise _failure("MALFORMED_FILE", "JSON array entry has no valid delimiter")
+            raise _failure(ErrorCode.MALFORMED_FILE, "JSON array entry has no valid delimiter")
         if len(rows) == limit:
             return rows
         if delimiter == "]":
             position += 1
             skip_space()
             if position != len(text):
-                raise _failure("MALFORMED_FILE", "JSON has trailing content")
+                raise _failure(ErrorCode.MALFORMED_FILE, "JSON has trailing content")
             return rows
         position += 1
         after_comma = True
@@ -186,9 +186,9 @@ def preview(connector: Connector, filename: str, limit: int) -> PreviewResult:
     validate_filename(filename)
     suffix = PurePath(filename).suffix.lower()
     if suffix not in {".csv", ".json"}:
-        raise _failure("UNSUPPORTED_PREVIEW_FORMAT", "Preview supports CSV and JSON files")
+        raise _failure(ErrorCode.UNSUPPORTED_PREVIEW_FORMAT, "Preview supports CSV and JSON files")
     if not 1 <= limit <= MAX_PREVIEW_ROWS:
-        raise _failure("INVALID_REQUEST", "limit must be between 1 and 100")
+        raise _failure(ErrorCode.INVALID_REQUEST, "limit must be between 1 and 100")
     text, at_limit = _read_prefix(connector, filename)
     if suffix == ".json":
         rows = _json_rows(text, limit, at_limit)

@@ -6,9 +6,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from support import client_for
 
-from databridge.api import create_app
 from databridge.config import Settings
 from databridge.connectors import sftp as sftp_module
 from databridge.connectors.base import CHUNK_SIZE
@@ -46,7 +45,7 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
     filename = f"integration-{uuid4().hex}.bin"
     host_file = PROJECT_ROOT / "sftp_data" / filename
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             created = client.post("/connections", json=_request("remote_server"))
             assert created.status_code == 201
             assert client.get("/connections/remote_server/files").status_code == 200
@@ -86,7 +85,7 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
             with connector.read(filename) as source:
                 assert source.read() == b"replacement"
             assert not any((PROJECT_ROOT / "sftp_data").glob(f".{filename}.databridge-*.part"))
-        with TestClient(create_app(trusted_settings)) as restarted:
+        with client_for(trusted_settings) as restarted:
             assert restarted.get("/connections/remote_server/files").status_code == 200
     finally:
         host_file.unlink(missing_ok=True)
@@ -96,7 +95,7 @@ def test_sftp_publish_time_collision_preserves_existing_file(trusted_settings: S
     filename = f"collision-{uuid4().hex}.bin"
     host_file = PROJECT_ROOT / "sftp_data" / filename
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             client.post("/connections", json=_request("remote_server"))
             connection = client.app.state.store.get("remote_server")
             connector = SFTPConnector(connection, trusted_settings.known_hosts_path)
@@ -112,7 +111,7 @@ def test_sftp_publish_time_collision_preserves_existing_file(trusted_settings: S
 
 
 def test_sftp_failures_have_distinct_safe_codes(trusted_settings: Settings) -> None:
-    with TestClient(create_app(trusted_settings)) as client:
+    with client_for(trusted_settings) as client:
         for request in (
             _request("bad_password", password="incorrect"),
             _request("bad_root", root="missing-directory"),
@@ -146,7 +145,7 @@ def test_sftp_failures_have_distinct_safe_codes(trusted_settings: Settings) -> N
         encryption_key=trusted_settings.encryption_key,
         known_hosts_path=trusted_settings.known_hosts_path.parent / "missing_known_hosts",
     )
-    with TestClient(create_app(untrusted)) as client:
+    with client_for(untrusted) as client:
         assert client.get("/connections/bad_root/files").json()["error"]["code"] == (
             "SFTP_HOST_KEY_REJECTED"
         )
@@ -164,7 +163,7 @@ def test_api_transfers_binary_both_directions_and_preserves_collision(
     remote_name = f"api-{uuid4().hex}.bin"
     host_file = PROJECT_ROOT / "sftp_data" / remote_name
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             assert (
                 client.post(
                     "/connections",
@@ -221,7 +220,7 @@ def test_api_failed_sftp_transfer_has_retrievable_record(
     trusted_settings: Settings, tmp_path: Path
 ) -> None:
     (tmp_path / "source.bin").write_bytes(b"contents")
-    with TestClient(create_app(trusted_settings)) as client:
+    with client_for(trusted_settings) as client:
         assert (
             client.post(
                 "/connections", json={"name": "source", "type": "local", "path": str(tmp_path)}
@@ -254,7 +253,7 @@ def test_sftp_preview_uses_shared_parser(trusted_settings: Settings) -> None:
     host_file = PROJECT_ROOT / "sftp_data" / filename
     host_file.write_bytes((PROJECT_ROOT / "instructions" / "products.json").read_bytes())
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             assert client.post("/connections", json=_request("remote")).status_code == 201
             response = client.get(f"/connections/remote/files/{filename}/head?limit=2")
         assert response.status_code == 200
@@ -272,7 +271,7 @@ def test_interrupted_transfer_stage_stays_hidden_after_restart(
     stage_name = f".{destination_name}.databridge-{transfer_id}.part"
     stage_file = PROJECT_ROOT / "sftp_data" / stage_name
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             assert client.post("/connections", json=_request("remote")).status_code == 201
             client.app.state.store.start_transfer(
                 transfer_id,
@@ -284,7 +283,7 @@ def test_interrupted_transfer_stage_stays_hidden_after_restart(
                 ),
             )
         stage_file.write_bytes(b"unpublished")
-        with TestClient(create_app(trusted_settings)) as restarted:
+        with client_for(trusted_settings) as restarted:
             record = restarted.get(f"/transfers/{transfer_id}").json()
             listing = restarted.get("/connections/remote/files").json()
         assert record["status"] == "failed"
@@ -303,7 +302,7 @@ def test_sftp_listing_reports_result_and_scan_caps(
     try:
         for file in files:
             file.write_bytes(b"x")
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             client.post("/connections", json=_request("remote"))
             monkeypatch.setattr(sftp_module, "MAX_LIST_RESULTS", 2)
             result_cap = client.get("/connections/remote/files").json()
@@ -324,7 +323,7 @@ def test_sftp_healthcheck_reports_unreadable_root(trusted_settings: Settings) ->
     host_dir.mkdir()
     host_dir.chmod(0)
     try:
-        with TestClient(create_app(trusted_settings)) as client:
+        with client_for(trusted_settings) as client:
             assert (
                 client.post(
                     "/connections", json=_request("blocked", root=f"data/{dirname}")

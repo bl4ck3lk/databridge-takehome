@@ -105,7 +105,7 @@ def main() -> None:
         source_root.mkdir()
         target_root.mkdir()
         settings = Settings(base / "state.sqlite3", Fernet.generate_key(), trust_file)
-        with TestClient(create_app(settings)) as client:
+        with TestClient(create_app(settings), base_url="http://127.0.0.1") as client:
             _create_connections(client, source_root, target_root)
             baseline_peak_rss_mib = _peak_rss_mib()
             for size_mib in args.sizes_mib:
