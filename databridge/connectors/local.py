@@ -16,7 +16,9 @@ from databridge.connectors.base import (
     ConnectorContext,
     Listing,
     bounded_listing,
+    destination_exists,
     probe_name,
+    source_changed,
     stage_name,
     validate_filename,
 )
@@ -52,16 +54,24 @@ def _write_error(exc: OSError, action: str) -> DataBridgeError:
 
 
 class _FileSource:
-    def __init__(self, descriptor: int) -> None:
+    def __init__(self, descriptor: int, size: int, filename: str) -> None:
         self._descriptor = descriptor
+        self._remaining = size
+        self._filename = filename
 
     def read(self, size: int, /) -> bytes:
+        if not self._remaining:
+            return b""
         try:
-            return os.read(self._descriptor, size)
+            data = os.read(self._descriptor, min(size, self._remaining))
         except OSError as exc:
             raise DataBridgeError(
                 ErrorCode.SOURCE_READ_FAILED, "Cannot read the local source file"
             ) from exc
+        if not data:
+            raise source_changed(self._filename)
+        self._remaining -= len(data)
+        return data
 
 
 class _FileSink:
@@ -183,12 +193,13 @@ class LocalConnector:
                 ) from exc
             raise DataBridgeError(ErrorCode.LOCAL_IO_ERROR, "Cannot open the local file") from exc
         try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode):
                 raise DataBridgeError(
                     ErrorCode.FILE_NOT_FOUND, f"'{filename}' is not a regular file"
                 )
             os.set_blocking(descriptor, True)
-            yield _FileSource(descriptor)
+            yield _FileSource(descriptor, opened.st_size, filename)
         finally:
             os.close(descriptor)
 
@@ -226,10 +237,7 @@ def _existing_file(destination: Path, filename: str, overwrite: bool) -> os.stat
     except OSError as exc:
         raise _write_error(exc, "inspect the destination") from exc
     if not overwrite:
-        raise DataBridgeError(
-            ErrorCode.DESTINATION_EXISTS,
-            f"'{filename}' already exists; set \"overwrite\": true to replace it",
-        )
+        raise destination_exists(filename)
     if not stat.S_ISREG(existing.st_mode):
         raise DataBridgeError(
             ErrorCode.DESTINATION_EXISTS, f"'{filename}' exists and is not a regular file"
@@ -260,10 +268,7 @@ def _publish(stage: Path, destination: Path, filename: str, overwrite: bool) -> 
         else:
             os.link(stage, destination)
     except FileExistsError as exc:
-        raise DataBridgeError(
-            ErrorCode.DESTINATION_EXISTS,
-            f"'{filename}' already exists; set \"overwrite\": true to replace it",
-        ) from exc
+        raise destination_exists(filename) from exc
     except OSError as exc:
         if not overwrite and exc.errno in _NO_HARD_LINKS:
             raise DataBridgeError(
@@ -283,11 +288,11 @@ def _sync_directory(directory: Path) -> None:
         finally:
             os.close(descriptor)
     except OSError:
-        _logger.warning("directory_sync_failed path=%s", directory)
+        _logger.warning("directory_sync_failed path=%r", str(directory))
 
 
 def _remove(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError:
-        _logger.warning("staging_cleanup_failed path=%s", path)
+        _logger.warning("staging_cleanup_failed path=%r", str(path))

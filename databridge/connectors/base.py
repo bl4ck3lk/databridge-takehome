@@ -35,7 +35,11 @@ class ConnectorContext:
 
 
 class ByteSource(Protocol):
-    """A readable byte stream; `read` may return fewer bytes than requested, and b"" means EOF."""
+    """The bytes a file held when it was opened; bytes appended later are not read.
+
+    `read` may return fewer bytes than requested, and b"" means the end. A file that becomes
+    shorter while it is read raises SOURCE_CHANGED instead of ending early.
+    """
 
     def read(self, size: int, /) -> bytes: ...
 
@@ -94,6 +98,20 @@ def validate_filename(filename: str) -> str:
             f"Names starting with {RESERVED_PREFIX!r} are reserved for DataBridge staging files",
         )
     return filename
+
+
+def source_changed(filename: str) -> DataBridgeError:
+    return DataBridgeError(
+        ErrorCode.SOURCE_CHANGED,
+        f"'{filename}' became shorter while it was read; it changed during the operation",
+    )
+
+
+def destination_exists(filename: str) -> DataBridgeError:
+    return DataBridgeError(
+        ErrorCode.DESTINATION_EXISTS,
+        f"'{filename}' already exists; set \"overwrite\": true to replace it",
+    )
 
 
 def is_reserved_name(filename: str) -> bool:

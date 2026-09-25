@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from support import read_all
 
 from databridge.connectors import CONNECTOR_TYPES, open_connector
 from databridge.connectors.base import ConnectorContext
@@ -92,6 +93,24 @@ def test_symlink_loop_is_an_invalid_filename(tmp_path: Path) -> None:
     (tmp_path / "loop.csv").symlink_to("loop.csv")
     connector = LocalConnector(tmp_path)
     assert _code(lambda: _read(connector, "loop.csv")) == ErrorCode.INVALID_FILENAME
+
+
+def test_read_returns_the_size_the_file_had_when_opened(tmp_path: Path) -> None:
+    growing = tmp_path / "growing.bin"
+    growing.write_bytes(b"a" * 100)
+    with LocalConnector(tmp_path).read("growing.bin") as source:
+        with growing.open("ab") as appended:
+            appended.write(b"b" * 50)
+        assert read_all(source) == b"a" * 100
+
+
+def test_file_that_shrinks_while_read_is_reported(tmp_path: Path) -> None:
+    shrinking = tmp_path / "shrinking.bin"
+    shrinking.write_bytes(b"a" * 100)
+    with LocalConnector(tmp_path).read("shrinking.bin") as source:
+        assert source.read(10) == b"a" * 10
+        os.truncate(shrinking, 50)
+        assert _code(lambda: read_all(source)) == ErrorCode.SOURCE_CHANGED
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
@@ -219,6 +238,23 @@ def test_cleanup_failure_after_publication_does_not_fail_the_write(
     _write(LocalConnector(tmp_path), "report.csv", b"payload")
 
     assert (tmp_path / "report.csv").read_bytes() == b"payload"
+
+
+def test_cleanup_failure_is_logged_on_one_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = tmp_path / "forged\nstaging_cleanup_failed path=elsewhere"
+    root.mkdir()
+    monkeypatch.setattr(os, "unlink", lambda path, *args, **kwargs: _refuse(errno.EBUSY))
+    _write(LocalConnector(root), "report.csv", b"payload")
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith("staging_cleanup_failed") for message in messages)
+    assert not any("\n" in message for message in messages)
+
+
+def _refuse(code: int) -> None:
+    raise OSError(code, os.strerror(code))
 
 
 def test_writable_root_passes_the_access_check_without_leaving_files(tmp_path: Path) -> None:

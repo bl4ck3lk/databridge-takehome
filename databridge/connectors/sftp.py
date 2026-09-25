@@ -1,34 +1,428 @@
-"""SFTP connector with explicit host trust and per-operation sessions."""
+"""SFTP connector: explicit host trust, per-operation sessions, and checked, pipelined requests."""
 
-import errno
+import logging
 import posixpath
+import shlex
 import socket
 import stat
-from contextlib import contextmanager
+import time
+from collections import deque
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, closing, contextmanager, suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterator
 from uuid import uuid4
 
 import paramiko
+from paramiko.sftp import (
+    CMD_ATTRS,
+    CMD_CLOSE,
+    CMD_DATA,
+    CMD_EXTENDED,
+    CMD_HANDLE,
+    CMD_LSTAT,
+    CMD_NAME,
+    CMD_OPEN,
+    CMD_OPENDIR,
+    CMD_READ,
+    CMD_READDIR,
+    CMD_REMOVE,
+    CMD_RENAME,
+    CMD_SETSTAT,
+    CMD_STAT,
+    CMD_STATUS,
+    CMD_WRITE,
+    SFTP_BAD_MESSAGE,
+    SFTP_CONNECTION_LOST,
+    SFTP_DESC,
+    SFTP_EOF,
+    SFTP_FLAG_CREATE,
+    SFTP_FLAG_EXCL,
+    SFTP_FLAG_READ,
+    SFTP_FLAG_WRITE,
+    SFTP_NO_CONNECTION,
+    SFTP_NO_SUCH_FILE,
+    SFTP_OK,
+    SFTP_OP_UNSUPPORTED,
+    SFTP_PERMISSION_DENIED,
+    SFTPError,
+    int64,
+)
 
 from databridge.connectors.base import (
     AccessCheck,
+    ByteSink,
+    ByteSource,
     ConnectorContext,
     Listing,
     bounded_listing,
+    destination_exists,
     probe_name,
+    source_changed,
     stage_name,
     validate_filename,
 )
 from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import Connection, SFTPConnection
 
+_logger = logging.getLogger(__name__)
+
+REQUEST_SIZE = 32_768
+"""The largest read or write request that every SFTP server must accept."""
+WINDOW = 64
+"""Requests in flight per file, as in OpenSSH sftp: 64 x 32 KiB = 2 MiB, one SSH channel window."""
+MAX_REPLY = 262_144
+"""The largest reply accepted, as in OpenSSH sftp; a larger one is a protocol error."""
+_OVERSIZED = -1
+_CONNECT_TIMEOUT = 10
+_REPLY_TIMEOUT = 30
+_LOST = (OSError, EOFError, paramiko.SSHException)
+"""Transport failures: every one of them means the session is gone."""
+
+
+class _Status(Exception):
+    """A reply other than success; `code` is the SFTP status code."""
+
+    def __init__(self, code: int, text: str = "") -> None:
+        super().__init__(f"{_describe(code)}: {text}")
+        self.code = code
+
+
+def _describe(code: int) -> str:
+    return SFTP_DESC[code] if 0 <= code < len(SFTP_DESC) else f"status {code}"
+
+
+@dataclass(frozen=True)
+class _Attributes:
+    size: int | None
+    mode: int | None
+
+
+class _Reader:
+    """The fields of one reply; a field that would pass its end is a protocol error.
+
+    Paramiko's Message pads a short read with up to 1 MiB of zeros, so a hostile count or
+    length would make it parse phantom data for as long as the count says.
+    """
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._offset = 0
+
+    def uint32(self) -> int:
+        return int.from_bytes(self._take(4), "big")
+
+    def uint64(self) -> int:
+        return int.from_bytes(self._take(8), "big")
+
+    def string(self) -> bytes:
+        return self._take(self.uint32())
+
+    def attributes(self) -> _Attributes:
+        flags = self.uint32()
+        size = self.uint64() if flags & paramiko.SFTPAttributes.FLAG_SIZE else None
+        if flags & paramiko.SFTPAttributes.FLAG_UIDGID:
+            self._take(8)
+        mode = self.uint32() if flags & paramiko.SFTPAttributes.FLAG_PERMISSIONS else None
+        if flags & paramiko.SFTPAttributes.FLAG_AMTIME:
+            self._take(8)
+        if flags & paramiko.SFTPAttributes.FLAG_EXTENDED:
+            for _ in range(self.uint32()):
+                self.string()
+                self.string()
+        return _Attributes(size, mode)
+
+    def _take(self, size: int) -> bytes:
+        end = self._offset + size
+        if end > len(self._payload):
+            raise _Status(SFTP_BAD_MESSAGE, "a reply shorter than its fields")
+        field = self._payload[self._offset : end]
+        self._offset = end
+        return field
+
+
+class _Requests:
+    """Paramiko's SFTP request layer with every reply delivered to the caller.
+
+    Paramiko's SFTPFile ignores the reply to CMD_CLOSE and the replies to pipelined writes still in
+    flight at close; its directory iterator handles a closed connection like the end of the
+    directory and fails on the first name that is not UTF-8. This class sends requests with
+    `SFTPClient._async_request` and receives replies with `SFTPClient._read_response`, the layer
+    SFTPFile itself uses, unchanged across the paramiko 5.x range that pyproject.toml allows, and
+    parses each reply with `_Reader`. A reply other than success raises `_Status`; any exception
+    in `_LOST` comes from the transport.
+    """
+
+    def __init__(self, client: paramiko.SFTPClient) -> None:
+        self._client = client
+        self._replies: dict[int, tuple[int, bytes]] = {}
+        self._ignored: set[int] = set()
+
+    def _async_response(self, kind: int, message: paramiko.Message, number: int) -> None:
+        """Paramiko delivers each reply to a request that `send` registered here."""
+        if number in self._ignored:
+            self._ignored.remove(number)
+        elif message.packet.getbuffer().nbytes > MAX_REPLY:
+            self._replies[number] = (_OVERSIZED, b"")
+        else:
+            self._replies[number] = (kind, message.get_remainder())
+
+    def send(self, kind: int, *args: object) -> int:
+        return int(self._client._async_request(self, kind, *args))
+
+    def receive(self, number: int, expected: int = CMD_STATUS) -> _Reader:
+        # Each packet read may take up to the channel timeout; unrelated packets must not
+        # extend the wait for this reply indefinitely.
+        deadline = time.monotonic() + _REPLY_TIMEOUT
+        while number not in self._replies:
+            if time.monotonic() > deadline:
+                raise TimeoutError("The SFTP server did not answer in time")
+            self._client._read_response()
+        kind, payload = self._replies.pop(number)
+        reply = _Reader(payload)
+        if kind == _OVERSIZED:
+            raise _Status(SFTP_BAD_MESSAGE, f"a reply larger than {MAX_REPLY} bytes")
+        if kind == CMD_STATUS:
+            code = reply.uint32()
+            if code != SFTP_OK:
+                raise _Status(code, reply.string().decode("utf-8", "replace"))
+            if expected != CMD_STATUS:
+                raise _Status(SFTP_BAD_MESSAGE, "a success status instead of a result")
+        elif kind != expected:
+            raise _Status(SFTP_BAD_MESSAGE, f"reply type {kind} instead of {expected}")
+        return reply
+
+    def call(self, kind: int, *args: object, expected: int = CMD_STATUS) -> _Reader:
+        return self.receive(self.send(kind, *args), expected)
+
+    def ignore(self, number: int) -> None:
+        """Drop the reply to a request whose outcome no longer matters."""
+        if self._replies.pop(number, None) is None:
+            self._ignored.add(number)
+
+    def attributes(self, kind: int, path: str) -> _Attributes:
+        return self.call(kind, path, expected=CMD_ATTRS).attributes()
+
+    def open(self, path: str, flags: int) -> bytes:
+        attributes = paramiko.SFTPAttributes()
+        return self.call(CMD_OPEN, path, flags, attributes, expected=CMD_HANDLE).string()
+
+    def open_directory(self, path: str) -> bytes:
+        return self.call(CMD_OPENDIR, path, expected=CMD_HANDLE).string()
+
+    def close_quietly(self, handle: bytes) -> None:
+        """Release a handle without waiting; its reply cannot change the outcome."""
+        with suppress(*_LOST):
+            self.ignore(self.send(CMD_CLOSE, handle))
+
+    def remove_quietly(self, path: str) -> None:
+        """Remove a staging or probe file; a leftover keeps its reserved, hidden name."""
+        try:
+            self.call(CMD_REMOVE, path)
+        except _Status as status:
+            if status.code != SFTP_NO_SUCH_FILE:
+                _logger.warning("staging_cleanup_failed path=%r status=%s", path, status.code)
+        except (SFTPError, *_LOST):
+            _logger.warning("staging_cleanup_failed path=%r status=connection_lost", path)
+
+
+def _unavailable(action: str) -> DataBridgeError:
+    return DataBridgeError(
+        ErrorCode.SFTP_UNAVAILABLE, f"The SFTP connection was lost while trying to {action}"
+    )
+
+
+def _root_unavailable(root: str) -> DataBridgeError:
+    return DataBridgeError(
+        ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
+        f"The SFTP root '{root}' does not exist or is not a directory",
+    )
+
+
+def _not_writable(root: str) -> DataBridgeError:
+    return DataBridgeError(
+        ErrorCode.DESTINATION_NOT_WRITABLE,
+        f"The SFTP user may not create or replace files in '{root}'",
+    )
+
+
+@contextmanager
+def _failures(
+    action: str,
+    *,
+    missing: DataBridgeError | None = None,
+    denied: DataBridgeError | None = None,
+    unsupported: DataBridgeError | None = None,
+    lost: DataBridgeError | None = None,
+) -> Iterator[None]:
+    """Translate SFTP failures in the block; `action` completes "while trying to ..."."""
+    try:
+        yield
+    except _Status as status:
+        classified = {
+            SFTP_NO_SUCH_FILE: missing,
+            SFTP_PERMISSION_DENIED: denied,
+            SFTP_OP_UNSUPPORTED: unsupported,
+        }.get(status.code)
+        if classified is not None:
+            raise classified from status
+        if status.code in {SFTP_NO_CONNECTION, SFTP_CONNECTION_LOST}:
+            raise (lost or _unavailable(action)) from status
+        raise DataBridgeError(
+            ErrorCode.SFTP_OPERATION_FAILED,
+            f"The SFTP server refused to {action} ({_describe(status.code)})",
+        ) from status
+    except UnicodeEncodeError as exc:
+        raise DataBridgeError(
+            ErrorCode.INVALID_CONNECTION_SETTINGS, "The SFTP root must be valid UTF-8 text"
+        ) from exc
+    except SFTPError as exc:
+        raise DataBridgeError(
+            ErrorCode.SFTP_OPERATION_FAILED,
+            f"The SFTP server sent an invalid reply while trying to {action}",
+        ) from exc
+    except _LOST as exc:
+        raise (lost or _unavailable(action)) from exc
+
+
+def _host_key_name(host: str, port: int) -> str:
+    """The name OpenSSH and paramiko look up in known_hosts."""
+    return host if port == 22 else f"[{host}]:{port}"
+
+
+def _presented(key: paramiko.PKey) -> str:
+    return f"a {key.get_name()} host key with fingerprint {key.fingerprint}"
+
 
 class _RejectUnknownHost(paramiko.MissingHostKeyPolicy):
+    """Refuse a server whose key is not trusted; the check precedes authentication."""
+
+    def __init__(self, connector: "SFTPConnector") -> None:
+        self._connector = connector
+
     def missing_host_key(
-        self, _client: paramiko.SSHClient, _hostname: str, _key: paramiko.PKey
+        self, _client: paramiko.SSHClient, _hostname: str, key: paramiko.PKey
     ) -> None:
-        raise DataBridgeError(ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP host key is not trusted")
+        connector = self._connector
+        raise DataBridgeError(
+            ErrorCode.SFTP_HOST_KEY_REJECTED,
+            f"The SFTP server {connector.host_key_name} presented {_presented(key)}, which is not "
+            f"trusted in {connector.known_hosts_path}. After verifying that fingerprint with the "
+            f"server's administrator, trust it with: {connector.keyscan_command}",
+        )
+
+
+class _Download:
+    """The first `size` bytes of a remote file, read in order with up to WINDOW requests in
+    flight (a ByteSource)."""
+
+    def __init__(self, requests: _Requests, handle: bytes, size: int, name: str) -> None:
+        self._requests = requests
+        self._handle = handle
+        self._name = name
+        self._size = size
+        self._next_offset = 0
+        self._pending: deque[tuple[int, int, int]] = deque()
+        self._leftover = b""
+
+    def read(self, size: int, /) -> bytes:
+        with _failures(
+            f"read '{self._name}'",
+            denied=DataBridgeError(
+                ErrorCode.FILE_NOT_READABLE, f"The SFTP user may not read '{self._name}'"
+            ),
+        ):
+            buffer = bytearray()
+            while len(buffer) < size and (self._leftover or self._pending or self._unrequested):
+                if not self._leftover:
+                    self._leftover = self._next_reply()
+                wanted = size - len(buffer)
+                buffer += self._leftover[:wanted]
+                self._leftover = self._leftover[wanted:]
+            return bytes(buffer)
+
+    def release(self) -> None:
+        for number, _offset, _length in self._pending:
+            self._requests.ignore(number)
+        self._pending.clear()
+        self._requests.close_quietly(self._handle)
+
+    @property
+    def _unrequested(self) -> bool:
+        return self._next_offset < self._size
+
+    def _next_reply(self) -> bytes:
+        """Receive the next range in file order; a short reply re-requests its remainder first."""
+        while len(self._pending) < WINDOW and self._unrequested:
+            length = min(REQUEST_SIZE, self._size - self._next_offset)
+            self._pending.append(self._request(self._next_offset, length))
+            self._next_offset += length
+        number, offset, length = self._pending.popleft()
+        try:
+            data = self._requests.receive(number, CMD_DATA).string()
+        except _Status as status:
+            if status.code != SFTP_EOF:
+                raise
+            data = b""
+        if not data:
+            raise source_changed(self._name)
+        if len(data) > length:
+            raise _Status(SFTP_BAD_MESSAGE, f"{len(data)} bytes for a {length}-byte request")
+        if len(data) < length:
+            self._pending.appendleft(self._request(offset + len(data), length - len(data)))
+        return data
+
+    def _request(self, offset: int, length: int) -> tuple[int, int, int]:
+        number = self._requests.send(CMD_READ, self._handle, int64(offset), length)
+        return number, offset, length
+
+
+class _Upload:
+    """A staging file written with up to WINDOW unacknowledged requests (a ByteSink)."""
+
+    def __init__(self, requests: _Requests, handle: bytes, root: str) -> None:
+        self._requests = requests
+        self._handle: bytes | None = handle
+        self._root = root
+        self._unacknowledged: deque[int] = deque()
+        self.size = 0
+
+    def write(self, data: bytes, /) -> None:
+        with _failures("write the staging file", denied=_not_writable(self._root)):
+            view = memoryview(data)
+            for start in range(0, len(view), REQUEST_SIZE):
+                if len(self._unacknowledged) >= WINDOW:
+                    self._requests.receive(self._unacknowledged.popleft())
+                chunk = bytes(view[start : start + REQUEST_SIZE])
+                number = self._requests.send(CMD_WRITE, self._open(), int64(self.size), chunk)
+                self._unacknowledged.append(number)
+                self.size += len(chunk)
+
+    def finish(self) -> None:
+        """Collect every write status, sync the data where the server can, and close the file."""
+        with _failures("finish the staging file", denied=_not_writable(self._root)):
+            while self._unacknowledged:
+                self._requests.receive(self._unacknowledged.popleft())
+            try:
+                self._requests.call(CMD_EXTENDED, "fsync@openssh.com", self._open())
+            except _Status as status:
+                if status.code != SFTP_OP_UNSUPPORTED:
+                    raise
+            handle, self._handle = self._open(), None
+            self._requests.call(CMD_CLOSE, handle)
+
+    def release(self) -> None:
+        for number in self._unacknowledged:
+            self._requests.ignore(number)
+        self._unacknowledged.clear()
+        if self._handle is not None:
+            handle, self._handle = self._handle, None
+            self._requests.close_quietly(handle)
+
+    def _open(self) -> bytes:
+        if self._handle is None:
+            raise RuntimeError("The staging file is already closed")
+        return self._handle
 
 
 class SFTPConnector:
@@ -48,160 +442,355 @@ class SFTPConnector:
         """SFTP settings are validated by the model; live access is checked by the healthcheck."""
         return connection
 
+    @property
+    def host_key_name(self) -> str:
+        return _host_key_name(self.connection.host, self.connection.port)
+
+    @property
+    def keyscan_command(self) -> str:
+        return (
+            f"ssh-keyscan -p {self.connection.port} {shlex.quote(self.connection.host)}"
+            f" >> {shlex.quote(str(self.known_hosts_path))}"
+        )
+
+    def list_files(self) -> Listing:
+        with self._session() as requests, self._root_failures():
+            with closing(self._entries(requests)) as entries:
+                return bounded_listing(entries)
+
     def check_access(self) -> AccessCheck:
-        self.list_files()
         probe = posixpath.join(self.root, probe_name(str(uuid4())))
-        with self._session() as sftp:
-            try:
-                sftp.open(probe, "wbx").close()
-            except OSError as exc:
-                if exc.errno == errno.EACCES:
-                    return AccessCheck(writable=False)
-                raise DataBridgeError(
-                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot test write access to the SFTP root"
-                ) from exc
-            try:
-                sftp.remove(probe)
-            except OSError:
-                pass  # A leftover probe uses the reserved prefix and never appears in listings.
+        with self._session() as requests:
+            with self._root_failures():
+                requests.close_quietly(requests.open_directory(self.root))
+            with _failures(
+                f"test write access to '{self.root}'", missing=_root_unavailable(self.root)
+            ):
+                try:
+                    handle = requests.open(
+                        probe, SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
+                    )
+                except _Status as status:
+                    if status.code == SFTP_PERMISSION_DENIED:
+                        return AccessCheck(writable=False)
+                    raise
+            requests.close_quietly(handle)
+            requests.remove_quietly(probe)
         return AccessCheck(writable=True)
+
+    @contextmanager
+    def read(self, filename: str) -> Iterator[ByteSource]:
+        path = self._path(filename)
+        with self._session() as requests:
+            with _failures(
+                f"open '{filename}'",
+                missing=DataBridgeError(
+                    ErrorCode.FILE_NOT_FOUND, f"'{filename}' was removed while it was opened"
+                ),
+                denied=DataBridgeError(
+                    ErrorCode.FILE_NOT_READABLE, f"The SFTP user may not read '{filename}'"
+                ),
+            ):
+                size = self._regular_file_size(requests, path, filename)
+                download = _Download(requests, requests.open(path, SFTP_FLAG_READ), size, filename)
+            try:
+                yield download
+            finally:
+                download.release()
+
+    @contextmanager
+    def write(self, filename: str, staging_id: str, overwrite: bool) -> Iterator[ByteSink]:
+        destination = self._path(filename)
+        stage = posixpath.join(self.root, stage_name(staging_id))
+        with self._session() as requests:
+            with _failures(f"inspect '{filename}'", denied=_not_writable(self.root)):
+                mode = self._replaceable_mode(requests, destination, filename, overwrite)
+            with _failures(
+                "create the staging file",
+                missing=_root_unavailable(self.root),
+                denied=_not_writable(self.root),
+            ):
+                flags = SFTP_FLAG_WRITE | SFTP_FLAG_CREATE | SFTP_FLAG_EXCL
+                upload = _Upload(requests, requests.open(stage, flags), self.root)
+            published = False
+            try:
+                yield upload
+                upload.finish()
+                self._prepare_stage(requests, stage, upload.size, mode)
+                self._publish(requests, stage, destination, filename, overwrite)
+                published = True
+            finally:
+                if not published:
+                    upload.release()
+                    requests.remove_quietly(stage)
 
     def _path(self, filename: str) -> str:
         validate_filename(filename)
         return posixpath.join(self.root, filename)
 
+    def _root_failures(self) -> AbstractContextManager[None]:
+        return _failures(
+            f"list '{self.root}'",
+            missing=_root_unavailable(self.root),
+            denied=DataBridgeError(
+                ErrorCode.CONNECTION_ROOT_UNAVAILABLE,
+                f"The SFTP user may not list the SFTP root '{self.root}'",
+            ),
+        )
+
+    def _entries(self, requests: _Requests) -> Iterator[tuple[str, bool]]:
+        """Yield `(name, is_regular_file)` per entry, reading one READDIR reply at a time."""
+        handle = requests.open_directory(self.root)
+        try:
+            while True:
+                try:
+                    reply = requests.call(CMD_READDIR, handle, expected=CMD_NAME)
+                except _Status as status:
+                    if status.code == SFTP_EOF:
+                        return
+                    raise
+                yield from self._classified(requests, _names(reply))
+        finally:
+            requests.close_quietly(handle)
+
+    def _classified(
+        self, requests: _Requests, entries: list[tuple[str, _Attributes]]
+    ) -> Iterator[tuple[str, bool]]:
+        """READDIR may omit permissions; lstat those entries, pipelined, before classifying."""
+        lookups = {
+            name: requests.send(CMD_LSTAT, posixpath.join(self.root, name))
+            for name, attributes in entries
+            if attributes.mode is None
+        }
+        try:
+            for name, attributes in entries:
+                mode = attributes.mode
+                if name in lookups:
+                    try:
+                        mode = requests.receive(lookups.pop(name), CMD_ATTRS).attributes().mode
+                    except _Status:
+                        mode = None  # removed or hidden since READDIR
+                yield name, mode is not None and stat.S_ISREG(mode)
+        finally:
+            for number in lookups.values():
+                requests.ignore(number)
+
+    def _regular_file_size(self, requests: _Requests, path: str, filename: str) -> int:
+        try:
+            attributes = requests.attributes(CMD_STAT, path)
+        except _Status as status:
+            if status.code != SFTP_NO_SUCH_FILE:
+                raise
+            raise self._missing(requests, filename) from status
+        if attributes.mode is not None and not stat.S_ISREG(attributes.mode):
+            raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, f"'{filename}' is not a regular file")
+        if attributes.size is None:
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED,
+                f"The SFTP server did not report the size of '{filename}', so it cannot be read",
+            )
+        return attributes.size
+
+    def _missing(self, requests: _Requests, filename: str) -> DataBridgeError:
+        try:
+            requests.attributes(CMD_STAT, self.root)
+        except _Status:
+            return _root_unavailable(self.root)
+        return DataBridgeError(
+            ErrorCode.FILE_NOT_FOUND, f"No file named '{filename}' at the SFTP root '{self.root}'"
+        )
+
+    @staticmethod
+    def _replaceable_mode(
+        requests: _Requests, destination: str, filename: str, overwrite: bool
+    ) -> int | None:
+        """Refuse an existing destination unless replacing it; return the mode to preserve."""
+        try:
+            attributes = requests.attributes(CMD_STAT, destination)
+        except _Status as status:
+            if status.code == SFTP_NO_SUCH_FILE:
+                return None
+            raise
+        if not overwrite:
+            raise destination_exists(filename)
+        if attributes.mode is None:
+            return None
+        if not stat.S_ISREG(attributes.mode):
+            raise DataBridgeError(
+                ErrorCode.DESTINATION_EXISTS, f"'{filename}' exists and is not a regular file"
+            )
+        return stat.S_IMODE(attributes.mode)
+
+    @staticmethod
+    def _prepare_stage(requests: _Requests, stage: str, size: int, mode: int | None) -> None:
+        """Prove the server holds every staged byte, then give the stage the replaced mode."""
+        with _failures("check the staging file"):
+            stored = requests.attributes(CMD_STAT, stage).size
+        if stored is None:
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED,
+                "The SFTP server did not report the staging file's size, so the upload cannot "
+                "be verified; nothing was published",
+            )
+        if stored != size:
+            raise DataBridgeError(
+                ErrorCode.SFTP_OPERATION_FAILED,
+                f"The SFTP server stored {stored} of {size} bytes of the staging file; "
+                "nothing was published",
+            )
+        if mode is not None:
+            attributes = paramiko.SFTPAttributes()
+            attributes.st_mode = mode
+            with _failures("copy the replaced file's permissions to the staging file"):
+                requests.call(CMD_SETSTAT, stage, attributes)
+
+    def _publish(
+        self, requests: _Requests, stage: str, destination: str, filename: str, overwrite: bool
+    ) -> None:
+        lost = DataBridgeError(
+            ErrorCode.SFTP_UNAVAILABLE,
+            f"The SFTP connection was lost while publishing '{filename}'; "
+            "the destination may already contain the new file",
+        )
+        unsupported = DataBridgeError(
+            ErrorCode.PUBLISH_UNSUPPORTED,
+            "The SFTP server cannot replace files atomically (it lacks the "
+            f"posix-rename@openssh.com extension), so '{filename}' was left unchanged; "
+            "choose another destination file name",
+        )
+        if not overwrite:
+            # OpenSSH's RENAME never replaces a file; this check also protects servers whose
+            # RENAME does, except against a file created between the check and the rename.
+            with _failures(f"inspect '{filename}'", denied=_not_writable(self.root)):
+                if self._exists(requests, destination):
+                    raise destination_exists(filename)
+        try:
+            with _failures(
+                f"publish '{filename}'",
+                denied=_not_writable(self.root),
+                unsupported=unsupported,
+                lost=lost,
+            ):
+                if overwrite:
+                    requests.call(CMD_EXTENDED, "posix-rename@openssh.com", stage, destination)
+                else:
+                    requests.call(CMD_RENAME, stage, destination)
+        except DataBridgeError as error:
+            if not overwrite and error.code == ErrorCode.SFTP_OPERATION_FAILED:
+                # The server answered, so nothing was published; OpenSSH answers a RENAME onto
+                # an existing file with a plain failure.
+                with _failures(f"inspect '{filename}'"):
+                    if self._exists(requests, destination):
+                        raise destination_exists(filename) from error
+            raise
+
+    @staticmethod
+    def _exists(requests: _Requests, path: str) -> bool:
+        try:
+            requests.attributes(CMD_STAT, path)
+        except _Status as status:
+            if status.code == SFTP_NO_SUCH_FILE:
+                return False
+            raise
+        return True
+
     @contextmanager
-    def _session(self) -> Iterator[paramiko.SFTPClient]:
+    def _session(self) -> Iterator[_Requests]:
         client = paramiko.SSHClient()
         try:
-            try:
-                client.load_host_keys(str(self.known_hosts_path))
-            except (OSError, paramiko.SSHException) as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP known-hosts file is missing or invalid"
-                ) from exc
-            client.set_missing_host_key_policy(_RejectUnknownHost())
-            try:
-                client.connect(
-                    hostname=self.connection.host,
-                    port=self.connection.port,
-                    username=self.connection.username,
-                    password=self.connection.password.get_secret_value(),
-                    allow_agent=False,
-                    look_for_keys=False,
-                    timeout=10,
-                    banner_timeout=10,
-                    auth_timeout=10,
-                    channel_timeout=10,
-                )
-            except DataBridgeError:
-                raise
-            except paramiko.BadHostKeyException as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_HOST_KEY_REJECTED, "SFTP host key does not match known-hosts"
-                ) from exc
-            except paramiko.AuthenticationException as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_AUTH_FAILED, "SFTP credentials were rejected"
-                ) from exc
-            except (OSError, socket.timeout, paramiko.SSHException) as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_UNAVAILABLE, "SFTP server is unavailable"
-                ) from exc
-            try:
+            self._trust(client)
+            self._connect(client)
+            with _failures(
+                "open an SFTP session",
+                lost=DataBridgeError(
+                    ErrorCode.SFTP_UNAVAILABLE, "The SFTP server did not open an SFTP session"
+                ),
+            ):
                 sftp = client.open_sftp()
-                sftp.get_channel().settimeout(30)
-            except (OSError, paramiko.SSHException) as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP session"
-                ) from exc
             try:
-                yield sftp
+                channel = sftp.get_channel()
+                if channel is not None:
+                    channel.settimeout(_REPLY_TIMEOUT)
+                yield _Requests(sftp)
             finally:
-                sftp.close()
+                # Closing the channel of a dropped session raises; the outcome is already known.
+                with suppress(*_LOST):
+                    sftp.close()
         finally:
             client.close()
 
-    def list_files(self) -> Listing:
-        with self._session() as sftp:
-            try:
-                return bounded_listing(
-                    (entry.filename, stat.S_ISREG(entry.st_mode or 0))
-                    for entry in sftp.listdir_iter(self.root, read_aheads=1)
-                )
-            except OSError as exc:
-                raise DataBridgeError(
-                    ErrorCode.CONNECTION_ROOT_UNAVAILABLE, "SFTP root directory cannot be listed"
-                ) from exc
-
-    @contextmanager
-    def read(self, filename: str) -> Iterator[BinaryIO]:
-        path = self._path(filename)
-        with self._session() as sftp:
-            try:
-                stream = sftp.file(path, "rb")
-            except OSError as exc:
-                if exc.errno == errno.ENOENT:
-                    raise DataBridgeError(ErrorCode.FILE_NOT_FOUND, "File not found") from exc
-                raise DataBridgeError(
-                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP file"
-                ) from exc
-            try:
-                yield stream
-            finally:
-                stream.close()
-
-    @staticmethod
-    def _exists(sftp: paramiko.SFTPClient, path: str) -> bool:
+    def _trust(self, client: paramiko.SSHClient) -> None:
         try:
-            sftp.stat(path)
-            return True
-        except OSError as exc:
-            if exc.errno == errno.ENOENT:
-                return False
+            client.load_host_keys(str(self.known_hosts_path))
+        except FileNotFoundError as exc:
+            raise self._trust_file_unusable("does not exist") from exc
+        except Exception as exc:  # the known_hosts parser raises undocumented types
+            raise self._trust_file_unusable("is not a readable known_hosts file") from exc
+        client.set_missing_host_key_policy(_RejectUnknownHost(self))
+
+    def _trust_file_unusable(self, reason: str) -> DataBridgeError:
+        return DataBridgeError(
+            ErrorCode.SFTP_HOST_KEY_REJECTED,
+            f"The trusted SFTP host key file {self.known_hosts_path} {reason}; after verifying "
+            f"the server's fingerprint, trust it with: {self.keyscan_command}",
+        )
+
+    def _connect(self, client: paramiko.SSHClient) -> None:
+        connection = self.connection
+        try:
+            client.connect(
+                hostname=connection.host,
+                port=connection.port,
+                username=connection.username,
+                password=connection.password.get_secret_value(),
+                allow_agent=False,
+                look_for_keys=False,
+                timeout=_CONNECT_TIMEOUT,
+                banner_timeout=_CONNECT_TIMEOUT,
+                auth_timeout=_CONNECT_TIMEOUT,
+                channel_timeout=_CONNECT_TIMEOUT,
+            )
+        except paramiko.BadHostKeyException as exc:
+            name = shlex.quote(self.host_key_name)
             raise DataBridgeError(
-                ErrorCode.SFTP_OPERATION_FAILED, "Cannot inspect SFTP file"
+                ErrorCode.SFTP_HOST_KEY_REJECTED,
+                f"The SFTP server {self.host_key_name} presented {_presented(exc.key)}, which "
+                f"does not match the key trusted in {self.known_hosts_path}. If the server's key "
+                "was replaced on purpose, verify the new fingerprint, remove the old entry with: "
+                f"ssh-keygen -R {name} -f {shlex.quote(str(self.known_hosts_path))}, then trust "
+                f"the new key with: {self.keyscan_command}",
+            ) from exc
+        except paramiko.AuthenticationException as exc:
+            raise DataBridgeError(
+                ErrorCode.SFTP_AUTH_FAILED, "The SFTP server rejected the username or password"
+            ) from exc
+        except UnicodeError as exc:
+            raise DataBridgeError(
+                ErrorCode.INVALID_CONNECTION_SETTINGS,
+                "The SFTP host name, username, or password cannot be sent to an SSH server",
+            ) from exc
+        except socket.gaierror as exc:
+            raise DataBridgeError(
+                ErrorCode.SFTP_UNAVAILABLE, f"Cannot resolve the SFTP host '{connection.host}'"
+            ) from exc
+        except _LOST as exc:
+            raise DataBridgeError(
+                ErrorCode.SFTP_UNAVAILABLE,
+                f"Cannot connect to the SFTP server at {self.host_key_name}",
             ) from exc
 
-    @contextmanager
-    def write(self, filename: str, transfer_id: str, overwrite: bool) -> Iterator[BinaryIO]:
-        destination = self._path(filename)
-        stage = posixpath.join(self.root, stage_name(transfer_id))
-        with self._session() as sftp:
-            if not overwrite and self._exists(sftp, destination):
-                raise DataBridgeError(
-                    ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
-                )
-            try:
-                stream = sftp.file(stage, "wbx")
-            except OSError as exc:
-                raise DataBridgeError(
-                    ErrorCode.SFTP_OPERATION_FAILED, "Cannot open SFTP staging file"
-                ) from exc
-            try:
-                try:
-                    yield stream
-                finally:
-                    stream.close()
-                if not overwrite and self._exists(sftp, destination):
-                    raise DataBridgeError(
-                        ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
-                    )
-                try:
-                    if overwrite:
-                        sftp.posix_rename(stage, destination)
-                    else:
-                        sftp.rename(stage, destination)
-                except OSError as exc:
-                    if not overwrite and self._exists(sftp, destination):
-                        raise DataBridgeError(
-                            ErrorCode.DESTINATION_EXISTS, "Destination file already exists"
-                        ) from exc
-                    raise DataBridgeError(
-                        ErrorCode.SFTP_OPERATION_FAILED, "Cannot publish SFTP file"
-                    ) from exc
-            finally:
-                try:
-                    sftp.remove(stage)
-                except OSError:
-                    pass  # Published already, or cleanup is unavailable.
+
+def _names(reply: _Reader) -> list[tuple[str, _Attributes]]:
+    """Parse a NAME reply, skipping "." and ".." and names the API cannot express as text."""
+    entries = []
+    for _ in range(reply.uint32()):
+        raw_name = reply.string()
+        reply.string()  # the "ls -l" style long name
+        attributes = reply.attributes()
+        try:
+            name = raw_name.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if name not in {".", ".."}:
+            entries.append((name, attributes))
+    return entries
