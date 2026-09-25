@@ -1,6 +1,6 @@
 """Reproducible end-to-end transfer probe against the local Docker SFTP fixture.
 
-Run `make benchmark` after the README's Docker and known-hosts bootstrap.
+Run `make benchmark` after `make quickstart` has started and trusted the Docker fixture.
 The measured duration includes connection setup and destination finalization.
 """
 

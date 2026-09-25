@@ -21,10 +21,11 @@ Status is **planned**, **partial**, or **verified**. Each row points to a test o
 
 Passing local tests alone does not establish the Docker or live HTTP path. The integration suite and smoke command cover those separately. Benchmark measurements apply to the stated machine and fixture.
 
-2026-09-24 gates after the dependency update: `make check` passed Ruff and 21 local/API tests; `make integration` passed all 13 real Docker SFTP tests; `make smoke` passed through live Uvicorn and Docker SFTP with matching hashes; `make benchmark` passed 16/256 MiB both ways. `make quickstart` passed the same check, integration, and smoke flow, then served live `/openapi.json` with HTTP 200. An earlier run also checked first-time known-hosts bootstrap.
+## Recorded gate runs
 
-After the local-root and logging change, `make check` passed Ruff and 23 local/API tests, `make integration` passed 13 Docker SFTP tests, and `make smoke` passed live HTTP and hash checks. A separate temporary server on port 8081 showed a 400 error event with the submitted file path and matching `X-Request-ID`, and a 201 event for an automatically created directory. That temporary server and its files were removed; the user's existing port-8080 server was left running.
-
-The user's replayed `POST /connections` was logged with `"path":"string"` and status 201. The empty placeholder directory and its unused connection were removed after confirming they were the only connection and no transfers existed. Concrete Swagger request examples were added; `make check` passed 23 local/API tests and `make integration` passed 13 real Docker SFTP tests after that change.
-
-After the OpenAPI error-schema and preview-boundary fixes, `make check` passed Ruff and 24 local/API tests, the Docker suite passed 13 integration tests, and live HTTP smoke passed with matching CSV hashes.
+| Date | Commit | `make check` | `make integration` | Live checks |
+| --- | --- | --- | --- | --- |
+| 2026-09-24 | `583fa38` | Ruff, 21 tests | 13 passed | `make smoke`, `make benchmark` (16/256 MiB both ways), and `make quickstart` with `/openapi.json` HTTP 200 |
+| 2026-09-24 | `eedb23f` | Ruff, 23 tests | 13 passed | `make smoke`; a temporary server on port 8081 logged a 400 with the submitted path and a 201 for a created directory, each with its `X-Request-ID` |
+| 2026-09-24 | `4f97f9c` | Ruff, 23 tests | 13 passed | — |
+| 2026-09-24 | `b43d62d` | Ruff, 24 tests | 13 passed | `make smoke` |

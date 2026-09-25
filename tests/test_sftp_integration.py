@@ -1,4 +1,4 @@
-"""Real SFTP tests; run with the documented Docker fixture and known-hosts bootstrap."""
+"""Real SFTP tests against the Docker fixture; run `make integration` after `make quickstart`."""
 
 import hashlib
 import shutil

@@ -1,6 +1,6 @@
 # Large-file transfer measurement
 
-Run `make benchmark` after the README's Docker and known-hosts setup. The script
+Run `make benchmark` after `make quickstart` has started the fixture. The script
 creates deterministic binary files, transfers each one local→SFTP→local through
 the HTTP app, compares SHA-256 at all three locations, and removes the generated
 files. The raw run is in [benchmark-results.json](benchmark-results.json).

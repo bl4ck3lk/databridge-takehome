@@ -1,6 +1,6 @@
 # Intent: DataBridge take-home
 
-Status: current scope; pending candidate final review
+Status: current scope
 Originator: candidate for the senior engineer, data platform role  
 Captured: 2026-09-24
 
