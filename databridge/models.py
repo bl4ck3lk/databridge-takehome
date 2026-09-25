@@ -1,29 +1,118 @@
-"""The small public connection contract."""
+"""The public request, response, and record models."""
 
-from typing import Annotated, Any, Literal
+import ipaddress
+import re
+import unicodedata
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Annotated, Any, Literal, get_args
 
-from pydantic import BaseModel, Field, SecretStr, StringConstraints
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+)
+
+from databridge.errors import ErrorCode
+
+MAX_SETTING_LENGTH = 4096
+_HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_SCOPE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def _plain_text(value: str) -> str:
+    """Refuse control characters, which would corrupt paths and log lines."""
+    if any(unicodedata.category(character) == "Cc" for character in value):
+        raise ValueError("must not contain control characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("must be valid Unicode text") from None
+    return value
+
+
+def _host(value: str) -> str:
+    """Accept an IP address or an ASCII DNS name, in lower case as OpenSSH records hosts."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        scope = getattr(address, "scope_id", None)
+        if scope is not None and not _SCOPE_ID.fullmatch(scope):
+            raise ValueError("must use an IPv6 zone of ASCII letters, digits, '.', '_', or '-'")
+        return str(address)
+    name = value.lower()
+    if len(name) > 253 or not all(_HOST_LABEL.fullmatch(label) for label in name.split(".")):
+        raise ValueError(
+            "must be an IP address or a host name made of ASCII letters, digits, and hyphens; "
+            "use the punycode form of an internationalized name"
+        )
+    return name
+
 
 ConnectionName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
+SettingText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=MAX_SETTING_LENGTH),
+    AfterValidator(_plain_text),
+]
+HostName = Annotated[str, StringConstraints(min_length=1, max_length=253), AfterValidator(_host)]
 
 
-class LocalConnection(BaseModel):
+def _encodable_secret(value: SecretStr) -> SecretStr:
+    try:
+        value.get_secret_value().encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("must be valid Unicode text") from None
+    return value
+
+
+Secret = Annotated[SecretStr, AfterValidator(_encodable_secret)]
+
+
+class _ConnectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class LocalConnection(_ConnectionInput):
     name: ConnectionName
     type: Literal["local"]
-    path: str = Field(min_length=1)
+    path: SettingText = Field(
+        description=(
+            "Directory on the service host; a relative path starts at the service's working "
+            "directory, and a missing directory is created"
+        )
+    )
 
 
-class SFTPConnection(BaseModel):
+class SFTPConnection(_ConnectionInput):
     name: ConnectionName
     type: Literal["sftp"]
-    host: str = Field(min_length=1)
+    host: HostName = Field(
+        description="IP address or host name; a host name is stored in lower case"
+    )
     port: int = Field(gt=0, le=65535)
-    username: str = Field(min_length=1)
-    password: SecretStr = Field(min_length=1)
-    root: str = Field(min_length=1)
+    username: SettingText = Field(
+        validation_alias=AliasChoices("username", "user"),
+        description="SFTP login name; the brief's `user` field is accepted too",
+    )
+    password: Secret = Field(min_length=1)
+    root: SettingText = Field(
+        description=(
+            "Directory on the SFTP server that holds the files, relative to the login directory "
+            "unless it starts with '/'; the supplied test server uses 'data'"
+        )
+    )
 
 
-ConnectionInput = Annotated[LocalConnection | SFTPConnection, Field(discriminator="type")]
+Connection = LocalConnection | SFTPConnection
+ConnectionInput = Annotated[Connection, Field(discriminator="type")]
 
 
 class LocalConnectionView(BaseModel):
@@ -44,6 +133,19 @@ class SFTPConnectionView(BaseModel):
 ConnectionView = LocalConnectionView | SFTPConnectionView
 
 
+def _type_name(model: type[BaseModel]) -> str:
+    return str(get_args(model.model_fields["type"].annotation)[0])
+
+
+CONNECTION_MODELS: Mapping[str, tuple[type[Connection], type[ConnectionView]]] = MappingProxyType(
+    {
+        _type_name(LocalConnection): (LocalConnection, LocalConnectionView),
+        _type_name(SFTPConnection): (SFTPConnection, SFTPConnectionView),
+    }
+)
+CONNECTION_TYPE_NAMES: tuple[str, ...] = tuple(CONNECTION_MODELS)
+
+
 class FileList(BaseModel):
     connection: str
     files: list[str]
@@ -53,12 +155,21 @@ class FileList(BaseModel):
 class HealthcheckResult(BaseModel):
     connection: str
     reachable: Literal[True]
+    writable: bool = Field(
+        description="Whether DataBridge could create and remove a probe file at the root"
+    )
+
+
+class FieldProblem(BaseModel):
+    field: str
+    problem: str
 
 
 class ErrorDetail(BaseModel):
-    code: str
+    code: ErrorCode
     message: str
-    transfer_id: str | None
+    transfer_id: str | None = None
+    details: list[FieldProblem] | None = None
 
 
 class ErrorResponse(BaseModel):
@@ -75,11 +186,26 @@ class PreviewResult(BaseModel):
 
 
 class TransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source: ConnectionName
     source_file: str = Field(min_length=1)
     destination: ConnectionName
     destination_file: str = Field(min_length=1)
     overwrite: bool = False
+
+
+TransferStatus = Literal["running", "publishing", "completed", "failed"]
+FailurePhase = Literal[
+    "source_lookup",
+    "destination_lookup",
+    "source_open",
+    "destination_open",
+    "source_read",
+    "destination_write",
+    "publication",
+    "interruption",
+]
 
 
 class TransferRecord(BaseModel):
@@ -88,10 +214,26 @@ class TransferRecord(BaseModel):
     source_file: str
     destination: str
     destination_file: str
-    status: Literal["running", "completed", "failed"]
-    started_at: str
-    completed_at: str | None
-    failed_at: str | None
-    bytes_copied: int
-    failure_phase: str | None
+    overwrite: bool
+    status: TransferStatus = Field(
+        description=(
+            "running: copying to a staging file; publishing: every byte is staged and the "
+            "destination is being replaced; completed; failed"
+        )
+    )
+    started_at: AwareDatetime
+    updated_at: AwareDatetime = Field(
+        description="Last change, including progress checkpoints about once per second"
+    )
+    completed_at: AwareDatetime | None
+    failed_at: AwareDatetime | None
+    bytes_copied: int = Field(
+        ge=0,
+        description=(
+            "Bytes written to the staging file; after a failure, a nonzero count does not mean "
+            "the destination changed"
+        ),
+    )
+    failure_phase: FailurePhase | None
+    error_code: ErrorCode | None
     error: str | None

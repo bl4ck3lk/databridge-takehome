@@ -1,30 +1,155 @@
-"""SQLite connection persistence with encryption at the write boundary."""
+"""SQLite persistence for connections and transfer records, with secrets encrypted at rest."""
 
+import fcntl
 import json
+import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterator
+from types import TracebackType
+from typing import Self
 
 from cryptography.fernet import Fernet, InvalidToken
+from pydantic import SecretStr
 
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import (
+    CONNECTION_MODELS,
+    Connection,
     ConnectionView,
-    LocalConnection,
-    LocalConnectionView,
-    SFTPConnection,
-    SFTPConnectionView,
+    FailurePhase,
     TransferRecord,
     TransferRequest,
+    TransferStatus,
 )
 
+SCHEMA_VERSION = "1"
 _KEY_CHECK = b"databridge-key-check-v1"
+_SCHEMA = (
+    "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+    """CREATE TABLE connections (
+        name TEXT PRIMARY KEY,
+        type TEXT NOT NULL,
+        settings_json TEXT NOT NULL,
+        secrets_ciphertext TEXT
+    )""",
+    """CREATE TABLE transfers (
+        id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        source_file TEXT NOT NULL,
+        destination TEXT NOT NULL,
+        destination_file TEXT NOT NULL,
+        overwrite INTEGER NOT NULL CHECK (overwrite IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('running', 'publishing', 'completed', 'failed')),
+        started_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT,
+        failed_at TEXT,
+        bytes_copied INTEGER NOT NULL CHECK (bytes_copied >= 0),
+        failure_phase TEXT,
+        error_code TEXT,
+        error TEXT
+    )""",
+    "CREATE INDEX transfers_by_start ON transfers (started_at)",
+)
+_INTERRUPTED = {
+    "copying": (
+        "The service stopped before the transfer finished; the destination is unchanged, "
+        "but its staging file may remain"
+    ),
+    "publishing": (
+        "The service stopped while publishing; the destination may already contain the new file"
+    ),
+}
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
+
+
+def _private_directory(directory: Path) -> None:
+    """Create a missing state directory as owner-only; leave an existing directory unchanged."""
+    if not directory.exists():
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def _change(
+    connection: sqlite3.Connection,
+    transfer_id: str,
+    statement: str,
+    parameters: tuple[object, ...],
+) -> None:
+    """Apply a compare-and-set state change; a record in another state is a conflict, never a
+    silent no-op, and the enclosing transaction commits nothing."""
+    if connection.execute(statement, parameters).rowcount != 1:
+        raise DataBridgeError(
+            ErrorCode.TRANSFER_STATE_CONFLICT,
+            "The transfer record is not in the state this change requires; another operation "
+            "already changed it",
+            transfer_id,
+        )
+
+
+def _connection_not_found(name: str) -> DataBridgeError:
+    return DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, f"Connection '{name}' not found")
+
+
+def _connection_models(kind: str) -> tuple[type[Connection], type[ConnectionView]]:
+    try:
+        return CONNECTION_MODELS[kind]
+    except KeyError:
+        raise RuntimeError(f"Unsupported connection type {kind!r}") from None
+
+
+class DatabaseOwnerLock:
+    """Hold an exclusive advisory lock so exactly one service process owns the database.
+
+    Startup recovery marks every running transfer as interrupted, which is correct only for the
+    process that owns the database. The operating system releases the lock when the process
+    exits, so a crash never leaves the database unusable.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._descriptor: int | None = None
+
+    def __enter__(self) -> Self:
+        _private_directory(self.path.parent)
+        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(descriptor)
+            raise RuntimeError(
+                f"Another DataBridge process is using the database locked by {self.path}; "
+                "stop that process before starting another"
+            ) from None
+        except BaseException:
+            os.close(descriptor)
+            raise
+        try:
+            os.fchmod(descriptor, 0o600)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if self._descriptor is not None:
+            descriptor = self._descriptor
+            self._descriptor = None
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 class ConnectionStore:
@@ -47,97 +172,130 @@ class ConnectionStore:
             connection.close()
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        _private_directory(self.path.parent)
+        descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.fchmod(descriptor, 0o600)
+        finally:
+            os.close(descriptor)
         with self._connect() as connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS connections (
-                    name TEXT PRIMARY KEY,
-                    type TEXT NOT NULL CHECK (type IN ('local', 'sftp')),
-                    settings_json TEXT NOT NULL,
-                    password_ciphertext TEXT
-                )"""
-            )
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS transfers (
-                    id TEXT PRIMARY KEY,
-                    source TEXT NOT NULL,
-                    source_file TEXT NOT NULL,
-                    destination TEXT NOT NULL,
-                    destination_file TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
-                    started_at TEXT NOT NULL,
-                    completed_at TEXT,
-                    failed_at TEXT,
-                    bytes_copied INTEGER NOT NULL DEFAULT 0,
-                    failure_phase TEXT,
-                    error TEXT
-                )"""
-            )
-            marker = connection.execute(
-                "SELECT value FROM metadata WHERE key = 'key_check'"
-            ).fetchone()
-            if marker is None:
-                connection.execute(
-                    "INSERT INTO metadata (key, value) VALUES ('key_check', ?)",
-                    (self.cipher.encrypt(_KEY_CHECK).decode("ascii"),),
-                )
+            tables = {
+                row["name"]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+            if tables:
+                self._verify_existing(connection, tables)
             else:
-                try:
-                    value = self.cipher.decrypt(marker["value"].encode("ascii"))
-                except InvalidToken as exc:
-                    raise RuntimeError(
-                        "DATABRIDGE_ENCRYPTION_KEY does not match the database"
-                    ) from exc
-                if value != _KEY_CHECK:
-                    raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database")
+                for statement in _SCHEMA:
+                    connection.execute(statement)
+                connection.executemany(
+                    "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                    (
+                        ("schema_version", SCHEMA_VERSION),
+                        ("key_check", self.cipher.encrypt(_KEY_CHECK).decode("ascii")),
+                    ),
+                )
             connection.execute(
                 """UPDATE transfers
-                SET status = 'failed', failed_at = ?, failure_phase = 'interruption',
-                    error = 'Service stopped before transfer completed'
-                WHERE status = 'running'""",
-                (_now(),),
+                SET status = 'failed', updated_at = :now, failed_at = :now,
+                    failure_phase = 'interruption', error_code = :code,
+                    error = CASE status WHEN 'publishing' THEN :publishing ELSE :copying END
+                WHERE status IN ('running', 'publishing')""",
+                {"now": _now(), "code": ErrorCode.TRANSFER_INTERRUPTED.value, **_INTERRUPTED},
             )
 
-    def create(self, item: LocalConnection | SFTPConnection) -> ConnectionView:
-        if isinstance(item, LocalConnection):
-            settings = {"path": item.path}
-            ciphertext = None
-        else:
-            settings = item.model_dump(exclude={"name", "type", "password"})
-            ciphertext = self.cipher.encrypt(item.password.get_secret_value().encode()).decode(
-                "ascii"
+    def _verify_existing(self, connection: sqlite3.Connection, tables: set[str]) -> None:
+        metadata = (
+            dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+            if "metadata" in tables
+            else {}
+        )
+        version = metadata.get("schema_version")
+        if version is None:
+            raise RuntimeError(
+                f"{self.path} has no DataBridge schema version; move it aside so the service "
+                "can create a new database"
             )
+        if version != SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{self.path} uses schema version {version}, but this service needs version "
+                f"{SCHEMA_VERSION}; move it aside so the service can create a new database"
+            )
+        try:
+            marker = self.cipher.decrypt(metadata["key_check"].encode("ascii"))
+        except (KeyError, InvalidToken) as exc:
+            raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database") from exc
+        if marker != _KEY_CHECK:
+            raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database")
+
+    def create(self, item: Connection) -> ConnectionView:
+        settings, ciphertext = self._columns(item)
         try:
             with self._connect() as connection:
                 connection.execute(
-                    "INSERT INTO connections (name, type, settings_json, password_ciphertext) "
+                    "INSERT INTO connections (name, type, settings_json, secrets_ciphertext) "
                     "VALUES (?, ?, ?, ?)",
                     (item.name, item.type, json.dumps(settings), ciphertext),
                 )
         except sqlite3.IntegrityError as exc:
-            raise DataBridgeError("CONNECTION_EXISTS", "Connection name already exists") from exc
+            if exc.sqlite_errorname != "SQLITE_CONSTRAINT_PRIMARYKEY":
+                raise
+            raise DataBridgeError(
+                ErrorCode.CONNECTION_EXISTS, f"Connection '{item.name}' already exists"
+            ) from exc
         return self._view(item.name, item.type, settings)
 
-    def get(self, name: str) -> LocalConnection | SFTPConnection:
+    def replace(self, item: Connection) -> ConnectionView:
+        """Replace every setting of an existing connection, including its type."""
+        settings, ciphertext = self._columns(item)
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE connections SET type = ?, settings_json = ?, secrets_ciphertext = ? "
+                "WHERE name = ?",
+                (item.type, json.dumps(settings), ciphertext, item.name),
+            ).rowcount
+        if changed != 1:
+            raise _connection_not_found(item.name)
+        return self._view(item.name, item.type, settings)
+
+    def delete(self, name: str) -> None:
+        """Remove a connection; transfer records keep its name as history."""
+        with self._connect() as connection:
+            deleted = connection.execute("DELETE FROM connections WHERE name = ?", (name,)).rowcount
+        if deleted != 1:
+            raise _connection_not_found(name)
+
+    def _columns(self, item: Connection) -> tuple[dict[str, object], str | None]:
+        """Split a connection into public settings and one encrypted value for its secrets."""
+        _connection_models(item.type)
+        secret_fields = {
+            name for name, field in type(item).model_fields.items() if field.annotation is SecretStr
+        }
+        settings = item.model_dump(mode="json", exclude={"name", "type", *secret_fields})
+        secrets = {name: getattr(item, name).get_secret_value() for name in sorted(secret_fields)}
+        ciphertext = (
+            self.cipher.encrypt(json.dumps(secrets).encode()).decode("ascii") if secrets else None
+        )
+        return settings, ciphertext
+
+    def get(self, name: str) -> Connection:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT name, type, settings_json, password_ciphertext "
-                "FROM connections WHERE name = ?",
+                "SELECT type, settings_json, secrets_ciphertext FROM connections WHERE name = ?",
                 (name,),
             ).fetchone()
         if row is None:
-            raise DataBridgeError("CONNECTION_NOT_FOUND", "Connection not found")
-        settings = json.loads(row["settings_json"])
-        if row["type"] == "local":
-            return LocalConnection(name=name, type="local", **settings)
-        try:
-            password = self.cipher.decrypt(row["password_ciphertext"].encode()).decode()
-        except InvalidToken as exc:
-            raise RuntimeError("Stored credential cannot be decrypted") from exc
-        return SFTPConnection(name=name, type="sftp", password=password, **settings)
+            raise _connection_not_found(name)
+        input_model, _view_model = _connection_models(row["type"])
+        secrets: dict[str, str] = {}
+        if row["secrets_ciphertext"] is not None:
+            try:
+                secrets = json.loads(self.cipher.decrypt(row["secrets_ciphertext"].encode()))
+            except InvalidToken as exc:
+                raise RuntimeError("Stored credential cannot be decrypted") from exc
+        return input_model.model_validate(
+            {"name": name, "type": row["type"], **json.loads(row["settings_json"]), **secrets}
+        )
 
     def get_public(self, name: str) -> ConnectionView:
         with self._connect() as connection:
@@ -145,7 +303,7 @@ class ConnectionStore:
                 "SELECT name, type, settings_json FROM connections WHERE name = ?", (name,)
             ).fetchone()
         if row is None:
-            raise DataBridgeError("CONNECTION_NOT_FOUND", "Connection not found")
+            raise _connection_not_found(name)
         return self._view(row["name"], row["type"], json.loads(row["settings_json"]))
 
     def list_public(self) -> list[ConnectionView]:
@@ -159,48 +317,96 @@ class ConnectionStore:
 
     @staticmethod
     def _view(name: str, kind: str, settings: dict[str, object]) -> ConnectionView:
-        if kind == "local":
-            return LocalConnectionView(name=name, type="local", **settings)
-        return SFTPConnectionView(name=name, type="sftp", **settings)
+        _input_model, view_model = _connection_models(kind)
+        return view_model.model_validate({"name": name, "type": kind, **settings})
 
-    def start_transfer(self, transfer_id: str, request: TransferRequest) -> TransferRecord:
-        with self._connect() as connection:
+    def start_transfer(self, transfer_id: str, request: TransferRequest) -> None:
+        now = _now()
+        with self._recording(transfer_id) as connection:
             connection.execute(
                 """INSERT INTO transfers (
-                    id, source, source_file, destination, destination_file,
-                    status, started_at, bytes_copied
-                ) VALUES (?, ?, ?, ?, ?, 'running', ?, 0)""",
+                    id, source, source_file, destination, destination_file, overwrite,
+                    status, started_at, updated_at, bytes_copied
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, 0)""",
                 (
                     transfer_id,
                     request.source,
                     request.source_file,
                     request.destination,
                     request.destination_file,
-                    _now(),
+                    int(request.overwrite),
+                    now,
+                    now,
                 ),
             )
-        return self.get_transfer(transfer_id)
 
-    def finish_transfer(self, transfer_id: str, bytes_copied: int) -> TransferRecord:
-        with self._connect() as connection:
-            connection.execute(
-                """UPDATE transfers SET status = 'completed', completed_at = ?, bytes_copied = ?
-                WHERE id = ? AND status = 'running'""",
-                (_now(), bytes_copied, transfer_id),
+    def record_progress(self, transfer_id: str, bytes_copied: int) -> None:
+        self._transition(
+            transfer_id,
+            """UPDATE transfers SET bytes_copied = ?, updated_at = ?
+            WHERE id = ? AND status = 'running'""",
+            (bytes_copied, _now(), transfer_id),
+        )
+
+    def mark_publishing(self, transfer_id: str, bytes_copied: int) -> None:
+        self._transition(
+            transfer_id,
+            """UPDATE transfers SET status = 'publishing', bytes_copied = ?, updated_at = ?
+            WHERE id = ? AND status = 'running'""",
+            (bytes_copied, _now(), transfer_id),
+        )
+
+    def finish_transfer(self, transfer_id: str) -> TransferRecord:
+        """Complete a publishing record and return it; if it cannot be read back, nothing
+        changes, so a completed record is always one the caller could report."""
+        now = _now()
+        with self._recording(transfer_id) as connection:
+            _change(
+                connection,
+                transfer_id,
+                """UPDATE transfers SET status = 'completed', completed_at = ?, updated_at = ?
+                WHERE id = ? AND status = 'publishing'""",
+                (now, now, transfer_id),
             )
-        return self.get_transfer(transfer_id)
+            row = connection.execute(
+                "SELECT * FROM transfers WHERE id = ?", (transfer_id,)
+            ).fetchone()
+            return TransferRecord.model_validate(dict(row))
 
     def fail_transfer(
-        self, transfer_id: str, bytes_copied: int, phase: str, message: str
-    ) -> TransferRecord:
-        with self._connect() as connection:
-            connection.execute(
-                """UPDATE transfers SET status = 'failed', failed_at = ?, bytes_copied = ?,
-                    failure_phase = ?, error = ?
-                WHERE id = ? AND status = 'running'""",
-                (_now(), bytes_copied, phase, message, transfer_id),
-            )
-        return self.get_transfer(transfer_id)
+        self,
+        transfer_id: str,
+        bytes_copied: int,
+        phase: FailurePhase,
+        code: ErrorCode,
+        message: str,
+    ) -> None:
+        now = _now()
+        self._transition(
+            transfer_id,
+            """UPDATE transfers SET status = 'failed', failed_at = ?, updated_at = ?,
+                bytes_copied = ?, failure_phase = ?, error_code = ?, error = ?
+            WHERE id = ? AND status IN ('running', 'publishing')""",
+            (now, now, bytes_copied, phase, code.value, message, transfer_id),
+        )
+
+    def _transition(self, transfer_id: str, statement: str, parameters: tuple[object, ...]) -> None:
+        with self._recording(transfer_id) as connection:
+            _change(connection, transfer_id, statement, parameters)
+
+    @contextmanager
+    def _recording(self, transfer_id: str) -> Iterator[sqlite3.Connection]:
+        """Write a transfer record; a database failure becomes a typed, attributable error."""
+        try:
+            with self._connect() as connection:
+                yield connection
+        except sqlite3.Error as exc:
+            raise DataBridgeError(
+                ErrorCode.TRANSFER_RECORD_FAILED,
+                "The transfer record could not be saved "
+                f"({getattr(exc, 'sqlite_errorname', type(exc).__name__)})",
+                transfer_id,
+            ) from exc
 
     def get_transfer(self, transfer_id: str) -> TransferRecord:
         with self._connect() as connection:
@@ -208,5 +414,15 @@ class ConnectionStore:
                 "SELECT * FROM transfers WHERE id = ?", (transfer_id,)
             ).fetchone()
         if row is None:
-            raise DataBridgeError("TRANSFER_NOT_FOUND", "Transfer not found")
+            raise DataBridgeError(ErrorCode.TRANSFER_NOT_FOUND, "Transfer not found")
         return TransferRecord.model_validate(dict(row))
+
+    def list_transfers(self, status: TransferStatus | None, limit: int) -> list[TransferRecord]:
+        """Return the newest transfers first, optionally only those in one status."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM transfers WHERE :status IS NULL OR status = :status
+                ORDER BY started_at DESC, rowid DESC LIMIT :limit""",
+                {"status": status, "limit": limit},
+            ).fetchall()
+        return [TransferRecord.model_validate(dict(row)) for row in rows]

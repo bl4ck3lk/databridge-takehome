@@ -13,9 +13,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
+import sftp_fixture
 from cryptography.fernet import Fernet
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = sftp_fixture.PROJECT_ROOT
 
 
 def _port() -> int:
@@ -26,14 +27,15 @@ def _port() -> int:
 
 def _request(base: str, method: str, path: str, body: dict | None = None) -> dict:
     data = json.dumps(body).encode() if body is not None else None
-    request = Request(
+    # The base is always http://127.0.0.1 with a port this script chose, never caller input.
+    request = Request(  # noqa: S310
         base + path,
         data=data,
         method=method,
         headers={"Content-Type": "application/json"} if data is not None else {},
     )
     try:
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=45) as response:  # noqa: S310
             return json.load(response)
     except HTTPError as exc:
         raise RuntimeError(f"{method} {path} returned {exc.code}: {exc.read().decode()}") from exc
@@ -79,11 +81,19 @@ def _transfer(base: str, source: str, source_file: str, target: str, target_file
     return record
 
 
+def _report_server_log(log: Path, lines: int = 40) -> None:
+    """Show why the service failed; its stderr would otherwise be lost with the process."""
+    tail = log.read_text(errors="replace").splitlines()[-lines:]
+    print(f"Last {len(tail)} lines of the service's stderr:", file=sys.stderr)
+    for line in tail:
+        print(f"  {line}", file=sys.stderr)
+
+
 def main() -> None:
-    trust_file = ROOT / "known_hosts"
-    remote_root = ROOT / "sftp_data"
+    trust_file = sftp_fixture.KNOWN_HOSTS
+    remote_root = sftp_fixture.DATA_DIR
     if not trust_file.is_file() or not remote_root.is_dir():
-        raise SystemExit("Run the README's Docker and known-hosts bootstrap first")
+        raise SystemExit("Run make quickstart first to start and trust the local SFTP fixture")
     if not (ROOT / "data" / "customers.csv").is_file():
         raise SystemExit("The committed data/customers.csv fixture is missing")
     if not (ROOT / "data" / "products.json").is_file():
@@ -105,40 +115,35 @@ def main() -> None:
                 "DATABRIDGE_KNOWN_HOSTS": str(trust_file),
             }
         )
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "databridge.api:app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--workers",
-                "1",
-                "--log-level",
-                "warning",
-            ],
-            cwd=ROOT,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        server_log = Path(temp) / "uvicorn.stderr.log"
+        with server_log.open("wb") as log:
+            # Fixed arguments: this interpreter runs uvicorn on a port this script chose.
+            process = subprocess.Popen(  # noqa: S603
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "databridge.api:app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--workers",
+                    "1",
+                    "--log-level",
+                    "warning",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=log,
+            )
         try:
             _wait_for_server(base, process)
             for body in (
                 {"name": "local_data", "type": "local", "path": str(ROOT / "data")},
                 {"name": "local_output", "type": "local", "path": str(output_root)},
-                {
-                    "name": "remote_server",
-                    "type": "sftp",
-                    "host": "127.0.0.1",
-                    "port": 2222,
-                    "username": "testuser",
-                    "password": "testpass",
-                    "root": "data",
-                },
+                sftp_fixture.connection("remote_server"),
             ):
                 _request(base, "POST", "/connections", body)
             _request(base, "POST", "/connections/remote_server/healthcheck")
@@ -178,6 +183,9 @@ def main() -> None:
                     indent=2,
                 )
             )
+        except Exception:
+            _report_server_log(server_log)
+            raise
         finally:
             process.terminate()
             try:

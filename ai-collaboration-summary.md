@@ -36,3 +36,12 @@ Three examples of direction and output:
 Docker integration also caught my initial Paramiko write-mode error. The
 candidate asked for a trail of work and for this report to be written together;
 the log records those corrections and the checks behind them.
+
+Other tools: the text above is Codex's response to the brief's prompt, edited
+with the candidate. Afterwards the candidate used Claude Code to review the
+repository and to implement the review's findings on the `fix/tribunal-findings`
+branch; `docs/ai-work-log.md` records that work and its checks.
+
+Codex later rechecked PR #1, reproduced seven remaining issues at its hosted head,
+then added regression tests and fixes with the candidate's authorization. The
+work log and verification map record the follow-up checks and benchmark.
