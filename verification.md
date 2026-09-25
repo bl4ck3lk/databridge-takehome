@@ -32,3 +32,4 @@ A second, independent review of the fix branch found 5 medium and 10 low defects
 | 2026-09-24 | `4f97f9c` | Ruff, 23 tests | 13 passed | — |
 | 2026-09-24 | `b43d62d` | Ruff, 24 tests | 13 passed | `make smoke` |
 | 2026-09-25 | `3fe79dd` | Ruff (with security rules), strict mypy, 203 tests | 14 passed | `make quickstart` on port 2223 through `make smoke`; `make benchmark` (16/256 MiB and 16 MiB at 20 ms, both ways) |
+| 2026-09-25 | `a8616fb` | Ruff (with security rules), strict mypy, 230 tests | 14 passed | `make quickstart` on port 2223 through `make smoke`; its final `make run` could not bind port 8080, which another DataBridge server held; `make benchmark` not rerun |
