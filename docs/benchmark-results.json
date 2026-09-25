@@ -6,40 +6,61 @@
   "sftp_image_platform": "linux/amd64",
   "measurement": "HTTP TestClient round trip; duration includes SSH connection and publish",
   "memory_note": "ru_maxrss is a process lifetime peak and is cumulative across cases",
-  "baseline_peak_process_rss_mib": 62.48,
+  "latency_note": "round_trip_ms > 0 routes through a loopback relay that delays each direction by half the round trip without limiting bandwidth",
+  "baseline_peak_process_rss_mib": 64.03,
   "results": [
     {
       "size_mib": 16,
+      "round_trip_ms": 0,
       "bytes": 16777216,
       "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
       "upload": {
-        "duration_seconds": 0.969,
-        "throughput_mib_s": 16.52,
-        "peak_process_rss_mib": 67.2,
-        "transfer_id": "bcea145b-4c50-4641-a9e4-7cb8775e4eae"
+        "duration_seconds": 0.584,
+        "throughput_mib_s": 27.4,
+        "peak_process_rss_mib": 69.8,
+        "transfer_id": "de0b66f5-c545-4f3d-ad5c-f62d559c1b0d"
       },
       "download": {
-        "duration_seconds": 1.265,
-        "throughput_mib_s": 12.65,
-        "peak_process_rss_mib": 72.44,
-        "transfer_id": "53485f49-23c9-44e6-a6c8-230708c4482a"
+        "duration_seconds": 0.565,
+        "throughput_mib_s": 28.31,
+        "peak_process_rss_mib": 77.16,
+        "transfer_id": "c082fa85-40aa-4ae4-a4a9-b870f9b445f4"
       }
     },
     {
       "size_mib": 256,
+      "round_trip_ms": 0,
       "bytes": 268435456,
       "sha256": "486cc817b95d853d3c357ff283b204c0144bd255e73fe2deb1389493b257e3c0",
       "upload": {
-        "duration_seconds": 7.969,
-        "throughput_mib_s": 32.12,
-        "peak_process_rss_mib": 72.44,
-        "transfer_id": "d42a37ba-80c7-4ece-8563-12bf04d8fdce"
+        "duration_seconds": 2.446,
+        "throughput_mib_s": 104.66,
+        "peak_process_rss_mib": 77.27,
+        "transfer_id": "5c0ff191-a911-4731-88be-13eb94e8fe6e"
       },
       "download": {
-        "duration_seconds": 7.469,
-        "throughput_mib_s": 34.27,
-        "peak_process_rss_mib": 72.44,
-        "transfer_id": "2e4536ba-6405-4af1-b668-e977a596db36"
+        "duration_seconds": 5.495,
+        "throughput_mib_s": 46.59,
+        "peak_process_rss_mib": 77.27,
+        "transfer_id": "f7360704-8254-463c-97b9-750342afa4dd"
+      }
+    },
+    {
+      "size_mib": 16,
+      "round_trip_ms": 20,
+      "bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "upload": {
+        "duration_seconds": 0.984,
+        "throughput_mib_s": 16.26,
+        "peak_process_rss_mib": 77.27,
+        "transfer_id": "58239a4b-5099-45b0-83ba-5bce369a9fca"
+      },
+      "download": {
+        "duration_seconds": 0.815,
+        "throughput_mib_s": 19.64,
+        "peak_process_rss_mib": 77.27,
+        "transfer_id": "779de421-3c57-4fc0-8b74-6c7c8579f357"
       }
     }
   ]

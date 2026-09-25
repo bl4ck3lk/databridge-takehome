@@ -1,6 +1,6 @@
 # DataBridge requirements and design spec
 
-Status: implemented; revised after the 2026-09-25 review (see `docs/ai-work-log.md`); `verification.md` states which evidence still needs a live re-run
+Status: implemented and verified; revised after the 2026-09-25 review (see `docs/ai-work-log.md`)
 Date: 2026-09-24  
 Input: [intent.md](intent.md) and the authoritative [take-home brief](instructions/README.md)
 

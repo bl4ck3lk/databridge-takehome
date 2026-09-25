@@ -1,0 +1,49 @@
+{
+  "host_platform": "macOS-26.5.1-arm64-arm-64bit",
+  "host_architecture": "arm64",
+  "python": "3.12.12",
+  "sftp_image": "atmoz/sftp:alpine-3.7",
+  "sftp_image_platform": "linux/amd64",
+  "measurement": "HTTP TestClient round trip; duration includes SSH connection and publish",
+  "memory_note": "ru_maxrss is a process lifetime peak and is cumulative across cases",
+  "latency_note": "round_trip_ms > 0 routes through a loopback relay that delays each direction by half the round trip without limiting bandwidth",
+  "baseline_peak_process_rss_mib": 66.09,
+  "results": [
+    {
+      "size_mib": 16,
+      "round_trip_ms": 0,
+      "bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "upload": {
+        "duration_seconds": 0.92,
+        "throughput_mib_s": 17.39,
+        "peak_process_rss_mib": 70.94,
+        "transfer_id": "e07bd1ba-302c-4d0c-9330-67897a5eb21e"
+      },
+      "download": {
+        "duration_seconds": 0.827,
+        "throughput_mib_s": 19.35,
+        "peak_process_rss_mib": 75.05,
+        "transfer_id": "df5b977c-4d30-4e0f-8a37-566f7352225e"
+      }
+    },
+    {
+      "size_mib": 16,
+      "round_trip_ms": 20,
+      "bytes": 16777216,
+      "sha256": "341aacac661ccb210720bedaa9ead5d668fe5ea41a73532fc147c71e34040df1",
+      "upload": {
+        "duration_seconds": 13.151,
+        "throughput_mib_s": 1.22,
+        "peak_process_rss_mib": 75.27,
+        "transfer_id": "6b003fd3-cde2-4ec3-a423-3445cc6f4448"
+      },
+      "download": {
+        "duration_seconds": 12.745,
+        "throughput_mib_s": 1.26,
+        "peak_process_rss_mib": 75.27,
+        "transfer_id": "5ffe1151-54a7-424b-b77c-defb24d1cf8e"
+      }
+    }
+  ]
+}

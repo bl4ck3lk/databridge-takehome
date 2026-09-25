@@ -196,7 +196,8 @@ local/API tests, which include SFTP tests against an in-process loopback server
 with injected faults. `make integration` runs the shared connector contract and
 Docker SFTP tests. `make smoke` is a live HTTP reviewer
 path. `make benchmark` checks SHA-256 and measures 16 MiB and 256 MiB transfers
-both ways. The [measured results](docs/benchmark.md) include throughput, peak
+both ways, plus 16 MiB through a relay that adds a 20 ms round trip. The
+[measured results](docs/benchmark.md) include throughput, peak
 process memory, host architecture, emulation, and an explicitly untested 1 GiB
 estimate. The [requirement evidence map](verification.md) ties R1–R14 to exact
 checks. [Intent](intent.md), [specification](spec.md), and the
