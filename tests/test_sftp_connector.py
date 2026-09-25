@@ -192,6 +192,9 @@ def test_hostile_listing_reply_fails_fast(serve: Callable[..., Remote], malforme
         ("write", "write"),
         ("fsync", "write"),
         ("close", "write"),
+        ("list_folder", "check"),
+        ("open", "check"),
+        ("remove", "check"),
     ],
 )
 def test_connection_drop_is_unavailable(
@@ -204,6 +207,7 @@ def test_connection_drop_is_unavailable(
         "list": connector.list_files,
         "read": lambda: _read(connector, "source.bin"),
         "write": lambda: _write(connector, "target.bin", PAYLOAD),
+        "check": connector.check_access,
     }
     assert _error(actions[action]).code == ErrorCode.SFTP_UNAVAILABLE
     assert not (remote.files / "target.bin").exists()
@@ -384,6 +388,16 @@ def test_read_only_root_is_not_writable(remote: Remote) -> None:
 def test_check_access_leaves_no_probe(remote: Remote) -> None:
     assert remote.connector().check_access().writable is True
     assert list(remote.files.iterdir()) == []
+
+
+def test_a_probe_that_cannot_be_removed_fails_the_access_check(
+    serve: Callable[..., Remote],
+) -> None:
+    remote = serve(Scenario(deny_remove=True))
+    error = _error(remote.connector().check_access)
+    assert error.code == ErrorCode.SFTP_OPERATION_FAILED
+    [probe] = list(remote.files.iterdir())
+    assert probe.name in error.message
 
 
 @pytest.mark.parametrize(

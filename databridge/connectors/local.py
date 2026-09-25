@@ -200,7 +200,14 @@ class LocalConnector:
             ) from exc
         with suppress(OSError):  # the probe exists, so the root is writable either way
             os.close(descriptor)
-        _remove(probe)
+        # The check leaves nothing behind, so a probe it cannot remove fails the check.
+        try:
+            probe.unlink()
+        except OSError as exc:
+            raise DataBridgeError(
+                ErrorCode.LOCAL_IO_ERROR,
+                f"Cannot remove the write-access probe '{probe.name}' from the connection root",
+            ) from exc
         return AccessCheck(writable=True)
 
     @contextmanager

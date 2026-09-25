@@ -242,7 +242,7 @@ class _Requests:
             self.ignore(self.send(CMD_CLOSE, handle))
 
     def remove_quietly(self, path: str) -> None:
-        """Remove a staging or probe file; a leftover keeps its reserved, hidden name."""
+        """Remove a staging file; a leftover keeps its reserved, hidden name."""
         try:
             self.call(CMD_REMOVE, path)
         except _Status as status:
@@ -570,7 +570,8 @@ class SFTPConnector:
                 return bounded_listing(entries)
 
     def check_access(self) -> AccessCheck:
-        probe = posixpath.join(self.root, probe_name(str(uuid4())))
+        name = probe_name(str(uuid4()))
+        probe = posixpath.join(self.root, name)
         with self._session() as requests:
             with self._root_failures():
                 requests.close_quietly(requests.open_directory(self.root))
@@ -586,7 +587,12 @@ class SFTPConnector:
                         return AccessCheck(writable=False)
                     raise
             requests.close_quietly(handle)
-            requests.remove_quietly(probe)
+            # The check leaves nothing behind, so a probe it cannot remove fails the check.
+            with _failures(
+                f"remove the write-access probe '{name}' from '{self.root}'",
+                missing=_root_unavailable(self.root),
+            ):
+                requests.call(CMD_REMOVE, probe)
         return AccessCheck(writable=True)
 
     @contextmanager

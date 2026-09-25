@@ -45,7 +45,7 @@ Use JSON requests and responses. Names and paths below are proposed public route
 | Delete connection | `DELETE /connections/{name}` | 204; its files and transfer records stay |
 | List files | `GET /connections/{name}/files` | File names only and a `truncated` indicator at the configured root |
 | Preview file | `GET /connections/{name}/files/{filename}/head?limit=5` | Format, rows, inferred schema; 5 rows by default |
-| Check connection | `POST /connections/{name}/healthcheck` | `reachable` plus `writable` (a probe file under the reserved prefix is created and removed), or a safe failure |
+| Check connection | `POST /connections/{name}/healthcheck` | `reachable` plus `writable` (a probe file under the reserved prefix is created and removed), or a safe failure; a probe that cannot be removed fails the check with a message that names it (`SFTP_OPERATION_FAILED` or `SFTP_UNAVAILABLE` for SFTP, `LOCAL_IO_ERROR` for local) |
 | Transfer file | `POST /transfers` | Completed record on success; error with transfer ID on failure; `overwrite` defaults to false |
 | List transfers | `GET /transfers?status=running&limit=50` | Newest records first, optionally one status; `limit` is 1–500 |
 | Inspect transfer | `GET /transfers/{id}` | Persisted status and metrics |

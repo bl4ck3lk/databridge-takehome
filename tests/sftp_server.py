@@ -28,6 +28,7 @@ from paramiko.sftp import (
     SFTP_FAILURE,
     SFTP_OK,
     SFTP_OP_UNSUPPORTED,
+    SFTP_PERMISSION_DENIED,
 )
 
 USERNAME = "testuser"
@@ -48,7 +49,8 @@ class Scenario:
     with an end-of-directory status sent one byte every 0.2 seconds. `endless_readdir` never
     ends a directory: "empty" pages hold no entries and "dots" pages hold only "." and "..".
     `fsync_seconds` delays fsync@openssh.com, and `after_stat` runs with the path after each
-    STAT reply is prepared, before it is sent.
+    STAT reply is prepared, before it is sent. `deny_remove` answers every REMOVE with
+    permission denied.
     """
 
     drop_before: str | None = None
@@ -69,6 +71,7 @@ class Scenario:
     endless_readdir: str | None = None
     fsync_seconds: float = 0.0
     after_stat: Callable[[str], None] | None = None
+    deny_remove: bool = False
     calls: Counter[str] = field(default_factory=Counter)
     pipelined: Counter[str] = field(default_factory=Counter)
 
@@ -182,6 +185,8 @@ class _Interface(SFTPServerInterface):
 
     def remove(self, path: str) -> int:
         self.begin("remove")
+        if self.scenario.deny_remove:
+            return SFTP_PERMISSION_DENIED
         try:
             self.real(path).unlink()
         except OSError as exc:

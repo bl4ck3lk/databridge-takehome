@@ -130,7 +130,8 @@ curl -sS -X DELETE http://127.0.0.1:8080/connections/local_output
 Connections persist across service restarts. SFTP connection creation checks
 the request shape; the healthcheck and file operations verify live credentials
 and root access, and the healthcheck also reports whether a probe file could be
-written. Responses never include the stored password. An existing local
+written. The healthcheck removes its probe; if it cannot, it fails and names the
+file. Responses never include the stored password. An existing local
 connection directory is reused; a missing one is created when the
 connection is created. Relative local paths such as `data` and `output` are
 resolved from the running service's working directory (the repository root for

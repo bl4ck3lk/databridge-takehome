@@ -316,6 +316,25 @@ def test_writable_root_passes_the_access_check_without_leaving_files(tmp_path: P
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_probe_that_cannot_be_removed_fails_the_access_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_unlink = os.unlink
+
+    def refuse_probe_removal(path: str, *args: object, **kwargs: object) -> None:
+        if Path(path).name.startswith(".databridge-check-"):
+            raise OSError(errno.EBUSY, "busy")
+        real_unlink(path)
+
+    monkeypatch.setattr(os, "unlink", refuse_probe_removal)
+    with pytest.raises(DataBridgeError) as caught:
+        LocalConnector(tmp_path).check_access()
+
+    assert caught.value.code == ErrorCode.LOCAL_IO_ERROR
+    [probe] = list(tmp_path.iterdir())
+    assert probe.name in caught.value.message
+
+
 def test_prepare_creates_and_resolves_the_root(tmp_path: Path) -> None:
     requested = LocalConnection(
         name="output", type="local", path=str(tmp_path / "new" / ".." / "out")
