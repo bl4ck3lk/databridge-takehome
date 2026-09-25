@@ -1,5 +1,7 @@
 """Preview shape, inference, and byte-budget behavior."""
 
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -139,6 +141,57 @@ def test_hostile_json_is_rejected_with_a_preview_error(
     response = _head(settings, tmp_path, "hostile.json", limit=1)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == code
+
+
+SMALL_STACK_PREVIEW = """
+import sys, threading
+from pathlib import Path
+from databridge.connectors.local import LocalConnector
+from databridge.errors import DataBridgeError
+from databridge.preview import preview
+
+codes = []
+
+def run():
+    try:
+        preview(LocalConnector(Path(sys.argv[1])), "deep.json", 1)
+    except DataBridgeError as exc:
+        codes.append(exc.code)
+
+threading.stack_size(128 * 1024)
+thread = threading.Thread(target=run)
+thread.start()
+thread.join()
+print(codes)
+"""
+
+
+@pytest.mark.parametrize("padded", [False, True], ids=["complete", "over-budget"])
+def test_deep_json_is_refused_on_a_small_thread_stack(tmp_path: Path, padded: bool) -> None:
+    """musl gives each thread 128 KiB of stack, and the API previews in a worker thread; the
+    recursive JSON decoder must never reach deep nesting there."""
+    document = "[" * 100_000 + "]" * 100_000
+    if padded:
+        document = document[:-1] + ',{"pad":"' + "p" * MAX_PREVIEW_BYTES + '"}]'
+    (tmp_path / "deep.json").write_text(document)
+    result = subprocess.run(
+        [sys.executable, "-c", SMALL_STACK_PREVIEW, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "[<ErrorCode.PREVIEW_LIMIT_EXCEEDED: 'PREVIEW_LIMIT_EXCEEDED'>]\n"
+
+
+def test_depth_is_checked_in_every_row_of_a_complete_file(
+    settings: Settings, tmp_path: Path
+) -> None:
+    deep_row = '{"a":' + "[" * 40 + "]" * 40 + "}"
+    (tmp_path / "rows.json").write_text(f'[{{"a":1}}, {deep_row}]')
+    response = _head(settings, tmp_path, "rows.json", limit=1)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "PREVIEW_LIMIT_EXCEEDED"
 
 
 PAD = "p" * MAX_PREVIEW_BYTES

@@ -23,6 +23,8 @@ InferredType = Literal["string", "integer", "float", "boolean", "date"]
 _INTEGER = re.compile(r"[+-]?[0-9]+")
 _FLOAT = re.compile(r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# A JSON string (possibly cut by the budget) or a bracket; strings are skipped whole.
+_JSON_TOKEN = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"?|[\[\]{}]')
 
 # One field may fill the whole preview budget; the csv module's default limit is 128 KiB.
 csv.field_size_limit(max(csv.field_size_limit(), MAX_PREVIEW_BYTES))
@@ -132,10 +134,7 @@ _DECODER = json.JSONDecoder(
 
 
 def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
-    try:
-        rows = _json_prefix(text, limit) if at_limit else _json_document(text, limit)
-    except RecursionError as exc:
-        raise _too_deep() from exc
+    rows = _json_prefix(text, limit) if at_limit else _json_document(text, limit)
     for row in rows:
         _check_row(row)
     return rows
@@ -143,6 +142,8 @@ def _json_rows(text: str, limit: int, at_limit: bool) -> list[dict[str, Any]]:
 
 def _json_document(text: str, limit: int) -> list[dict[str, Any]]:
     """Validate a file that fits the budget in full, then return its first rows."""
+    # Rows sit inside the top-level array, one level below the values _json_prefix checks.
+    _check_nesting(text, _skip_space(text, 0), MAX_JSON_DEPTH + 1)
     try:
         document = _DECODER.decode(text)
     except json.JSONDecodeError as exc:
@@ -168,6 +169,7 @@ def _json_prefix(text: str, limit: int) -> list[dict[str, Any]]:
             if after_comma:
                 raise DataBridgeError(ErrorCode.MALFORMED_FILE, "JSON array has a trailing comma")
             return _end_of_array(text, position, rows)
+        _check_nesting(text, position, MAX_JSON_DEPTH)
         try:
             item, position = _DECODER.raw_decode(text, position)
         except json.JSONDecodeError as exc:
@@ -228,13 +230,30 @@ def _too_deep() -> DataBridgeError:
     )
 
 
+def _check_nesting(text: str, start: int, limit: int) -> None:
+    """Refuse a value at `start` that nests deeper than `limit` before the recursive decoder
+    parses it: deep nesting overflows a worker thread's stack (128 KiB under musl) before the
+    decoder can raise RecursionError."""
+    if start >= len(text) or text[start] not in "[{":
+        return
+    depth = 0
+    for token in _JSON_TOKEN.finditer(text, start):
+        bracket = token.group()
+        if bracket in {"[", "{"}:
+            depth += 1
+            if depth > limit:
+                raise _too_deep()
+        elif bracket in {"]", "}"}:
+            depth -= 1
+            if depth == 0:
+                return
+
+
 def _check_row(row: dict[str, Any]) -> None:
-    """Bound nesting and reject unpaired surrogates, which no JSON response can encode."""
-    pending: list[tuple[dict[str, Any] | list[Any], int]] = [(row, 1)]
+    """Reject unpaired surrogates, which no JSON response can encode."""
+    pending: list[dict[str, Any] | list[Any]] = [row]
     while pending:
-        container, depth = pending.pop()
-        if depth > MAX_JSON_DEPTH:
-            raise _too_deep()
+        container = pending.pop()
         pairs = container.items() if isinstance(container, dict) else enumerate(container)
         for key, value in pairs:
             for text in (key, value):
@@ -243,7 +262,7 @@ def _check_row(row: dict[str, Any]) -> None:
                         ErrorCode.MALFORMED_FILE, "JSON contains an unpaired surrogate escape"
                     )
             if isinstance(value, dict | list):
-                pending.append((value, depth + 1))
+                pending.append(value)
 
 
 def _encodable(text: str) -> bool:
