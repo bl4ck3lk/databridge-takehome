@@ -52,6 +52,7 @@ def test_sftp_roundtrip_collision_and_explicit_overwrite(trusted_settings: Setti
             assert client.post("/connections/remote_server/healthcheck").json() == {
                 "connection": "remote_server",
                 "reachable": True,
+                "writable": True,
             }
 
             connection = client.app.state.store.get("remote_server")

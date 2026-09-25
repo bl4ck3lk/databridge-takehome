@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, Query, Request, status
+from fastapi import Body, FastAPI, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
@@ -14,7 +14,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from databridge.config import Settings
 from databridge.connectors import open_connector, prepare_connection
-from databridge.connectors.base import ConnectorContext
+from databridge.connectors.base import Connector, ConnectorContext
 from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import (
     CONNECTION_TYPE_NAMES,
@@ -66,6 +66,41 @@ def _error_responses(
         }
         for status_code, names in sorted(grouped.items())
     }
+
+
+_CONNECTION_BODY = Body(
+    discriminator="type",
+    description=(
+        "Local paths are relative to the server's working directory; missing directories are "
+        "created. Unknown fields are rejected."
+    ),
+    openapi_examples={
+        "local_data": {
+            "summary": "Read supplied files",
+            "value": {"name": "local_data", "type": "local", "path": "data"},
+        },
+        "local_output": {
+            "summary": "Write local output",
+            "value": {"name": "local_output", "type": "local", "path": "output"},
+        },
+        "sftp": {
+            "summary": "Supplied SFTP fixture",
+            "value": {
+                "name": "remote_server",
+                "type": "sftp",
+                "host": "127.0.0.1",
+                "port": 2222,
+                "username": "testuser",
+                "password": "testpass",
+                "root": "data",
+            },
+        },
+    },
+)
+
+
+def _connector(request: Request, name: str) -> Connector:
+    return open_connector(request.app.state.store.get(name), request.app.state.connector_context)
 
 
 def _problem_text(message: str) -> str:
@@ -202,44 +237,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
     )
     def create_connection(
-        item: Annotated[
-            ConnectionInput,
-            Body(
-                discriminator="type",
-                description=(
-                    "Local paths are relative to the server's working directory; "
-                    "missing directories are created."
-                ),
-                openapi_examples={
-                    "local_data": {
-                        "summary": "Read supplied files",
-                        "value": {"name": "local_data", "type": "local", "path": "data"},
-                    },
-                    "local_output": {
-                        "summary": "Write local output",
-                        "value": {"name": "local_output", "type": "local", "path": "output"},
-                    },
-                    "sftp": {
-                        "summary": "Supplied SFTP fixture",
-                        "value": {
-                            "name": "remote_server",
-                            "type": "sftp",
-                            "host": "127.0.0.1",
-                            "port": 2222,
-                            "username": "testuser",
-                            "password": "testpass",
-                            "root": "data",
-                        },
-                    },
-                },
-            ),
-        ],
-        request: Request,
+        item: Annotated[ConnectionInput, _CONNECTION_BODY], request: Request
     ) -> ConnectionView:
         request.state.body_params = body_log_fields(
             item.model_dump(exclude={"password"}), "/connections"
         )
         return request.app.state.store.create(prepare_connection(item))
+
+    @application.put(
+        "/connections/{name}",
+        response_model=ConnectionView,
+        responses=_error_responses(
+            ErrorCode.INVALID_REQUEST,
+            ErrorCode.INVALID_CONNECTION_SETTINGS,
+            ErrorCode.CONNECTION_NOT_FOUND,
+            changes_state=True,
+        ),
+    )
+    def replace_connection(
+        name: str, item: Annotated[ConnectionInput, _CONNECTION_BODY], request: Request
+    ) -> ConnectionView:
+        """Replace every setting of a connection; an SFTP password must be sent again."""
+        request.state.body_params = body_log_fields(
+            item.model_dump(exclude={"password"}), "/connections"
+        )
+        if item.name != name:
+            raise DataBridgeError(
+                ErrorCode.INVALID_CONNECTION_SETTINGS,
+                f"The body names connection '{item.name}', but the path names '{name}'",
+            )
+        store = request.app.state.store
+        store.get_public(name)  # a missing connection must not create a local directory
+        return store.replace(prepare_connection(item))
+
+    @application.delete(
+        "/connections/{name}",
+        status_code=status.HTTP_204_NO_CONTENT,
+        response_class=Response,
+        responses=_error_responses(ErrorCode.CONNECTION_NOT_FOUND, changes_state=True),
+    )
+    def delete_connection(name: str, request: Request) -> Response:
+        """Remove a connection; its files and its transfer records stay."""
+        request.app.state.store.delete(name)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @application.get(
         "/connections", response_model=list[ConnectionView], responses=_error_responses()
@@ -267,23 +307,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         responses=_error_responses(*listing_errors),
     )
     def list_files(name: str, request: Request) -> FileList:
-        connector = open_connector(
-            request.app.state.store.get(name), request.app.state.connector_context
-        )
-        listing = connector.list_files()
+        listing = _connector(request, name).list_files()
         return FileList(connection=name, files=listing.files, truncated=listing.truncated)
 
     @application.post(
         "/connections/{name}/healthcheck",
         response_model=HealthcheckResult,
-        responses=_error_responses(*listing_errors, changes_state=True),
+        responses=_error_responses(*listing_errors, ErrorCode.LOCAL_IO_ERROR, changes_state=True),
     )
     def healthcheck(name: str, request: Request) -> HealthcheckResult:
-        connector = open_connector(
-            request.app.state.store.get(name), request.app.state.connector_context
-        )
-        connector.list_files()
-        return HealthcheckResult(connection=name, reachable=True)
+        """Check credentials, list access to the root, and write access with a probe file."""
+        access = _connector(request, name).check_access()
+        return HealthcheckResult(connection=name, reachable=True, writable=access.writable)
 
     @application.get(
         "/connections/{name}/files/{filename}/head",
@@ -310,10 +345,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             int, Query(ge=1, le=MAX_PREVIEW_ROWS, description="Rows to return")
         ] = DEFAULT_PREVIEW_ROWS,
     ) -> PreviewResult:
-        connector = open_connector(
-            request.app.state.store.get(name), request.app.state.connector_context
-        )
-        return preview(connector, filename, limit)
+        return preview(_connector(request, name), filename, limit)
 
     @application.post(
         "/transfers",

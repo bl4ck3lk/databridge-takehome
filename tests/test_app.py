@@ -20,6 +20,10 @@ EXPECTED_STATUSES = {
     ("post", "/connections"): {"201", "400", "409", "422"} | GLOBAL_STATUSES | UNSAFE_STATUSES,
     ("get", "/connections"): {"200"} | GLOBAL_STATUSES,
     ("get", "/connections/{name}"): {"200", "404"} | GLOBAL_STATUSES,
+    ("put", "/connections/{name}"): (
+        {"200", "400", "404", "422"} | GLOBAL_STATUSES | UNSAFE_STATUSES
+    ),
+    ("delete", "/connections/{name}"): {"204", "404"} | GLOBAL_STATUSES | UNSAFE_STATUSES,
     ("get", "/connections/{name}/files"): {"200", "404", "502", "503"} | GLOBAL_STATUSES,
     ("post", "/connections/{name}/healthcheck"): (
         {"200", "404", "502", "503"} | GLOBAL_STATUSES | UNSAFE_STATUSES

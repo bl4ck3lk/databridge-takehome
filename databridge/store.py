@@ -75,6 +75,10 @@ def _private_directory(directory: Path) -> None:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
 
 
+def _connection_not_found(name: str) -> DataBridgeError:
+    return DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, f"Connection '{name}' not found")
+
+
 def _connection_models(kind: str) -> tuple[type[Connection], type[ConnectionView]]:
     try:
         return CONNECTION_MODELS[kind]
@@ -196,15 +200,7 @@ class ConnectionStore:
             raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database")
 
     def create(self, item: Connection) -> ConnectionView:
-        _connection_models(item.type)
-        secret_fields = {
-            name for name, field in type(item).model_fields.items() if field.annotation is SecretStr
-        }
-        settings = item.model_dump(mode="json", exclude={"name", "type", *secret_fields})
-        secrets = {name: getattr(item, name).get_secret_value() for name in sorted(secret_fields)}
-        ciphertext = (
-            self.cipher.encrypt(json.dumps(secrets).encode()).decode("ascii") if secrets else None
-        )
+        settings, ciphertext = self._columns(item)
         try:
             with self._connect() as connection:
                 connection.execute(
@@ -220,6 +216,39 @@ class ConnectionStore:
             ) from exc
         return self._view(item.name, item.type, settings)
 
+    def replace(self, item: Connection) -> ConnectionView:
+        """Replace every setting of an existing connection, including its type."""
+        settings, ciphertext = self._columns(item)
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE connections SET type = ?, settings_json = ?, secrets_ciphertext = ? "
+                "WHERE name = ?",
+                (item.type, json.dumps(settings), ciphertext, item.name),
+            ).rowcount
+        if changed != 1:
+            raise _connection_not_found(item.name)
+        return self._view(item.name, item.type, settings)
+
+    def delete(self, name: str) -> None:
+        """Remove a connection; transfer records keep its name as history."""
+        with self._connect() as connection:
+            deleted = connection.execute("DELETE FROM connections WHERE name = ?", (name,)).rowcount
+        if deleted != 1:
+            raise _connection_not_found(name)
+
+    def _columns(self, item: Connection) -> tuple[dict[str, object], str | None]:
+        """Split a connection into public settings and one encrypted value for its secrets."""
+        _connection_models(item.type)
+        secret_fields = {
+            name for name, field in type(item).model_fields.items() if field.annotation is SecretStr
+        }
+        settings = item.model_dump(mode="json", exclude={"name", "type", *secret_fields})
+        secrets = {name: getattr(item, name).get_secret_value() for name in sorted(secret_fields)}
+        ciphertext = (
+            self.cipher.encrypt(json.dumps(secrets).encode()).decode("ascii") if secrets else None
+        )
+        return settings, ciphertext
+
     def get(self, name: str) -> Connection:
         with self._connect() as connection:
             row = connection.execute(
@@ -227,7 +256,7 @@ class ConnectionStore:
                 (name,),
             ).fetchone()
         if row is None:
-            raise DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, f"Connection '{name}' not found")
+            raise _connection_not_found(name)
         input_model, _view_model = _connection_models(row["type"])
         secrets: dict[str, str] = {}
         if row["secrets_ciphertext"] is not None:
@@ -245,7 +274,7 @@ class ConnectionStore:
                 "SELECT name, type, settings_json FROM connections WHERE name = ?", (name,)
             ).fetchone()
         if row is None:
-            raise DataBridgeError(ErrorCode.CONNECTION_NOT_FOUND, f"Connection '{name}' not found")
+            raise _connection_not_found(name)
         return self._view(row["name"], row["type"], json.loads(row["settings_json"]))
 
     def list_public(self) -> list[ConnectionView]:

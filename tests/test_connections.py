@@ -1,5 +1,7 @@
+import os
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
@@ -32,9 +34,155 @@ def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path:
         "files": ["customers.csv"],
         "truncated": False,
     }
-    assert health.json() == {"connection": "local_data", "reachable": True}
+    assert health.json() == {"connection": "local_data", "reachable": True, "writable": True}
     with client_for(settings) as client:
         assert client.get("/connections/local_data").json() == created.json()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file permissions")
+def test_healthcheck_reports_a_read_only_root(settings: Settings, tmp_path: Path) -> None:
+    root = tmp_path / "read-only"
+    root.mkdir()
+    with client_for(settings) as client:
+        assert _local(client, "reports", root).status_code == 201
+        root.chmod(0o555)
+        try:
+            health = client.post("/connections/reports/healthcheck")
+        finally:
+            root.chmod(0o755)
+    assert health.json() == {"connection": "reports", "reachable": True, "writable": False}
+    assert list(root.iterdir()) == []
+
+
+def _local(client: TestClient, name: str, path: Path | str) -> Any:
+    return client.post("/connections", json={"name": name, "type": "local", "path": str(path)})
+
+
+def _sftp(**changes: object) -> dict[str, object]:
+    return {
+        "name": "remote_server",
+        "type": "sftp",
+        "host": "127.0.0.1",
+        "port": 2222,
+        "username": "testuser",
+        "password": "testpass",
+        "root": "data",
+        **changes,
+    }
+
+
+def test_connection_can_be_replaced_and_deleted(settings: Settings, tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    with client_for(settings) as client:
+        assert _local(client, "files", first).status_code == 201
+        replaced = client.put(
+            "/connections/files", json={"name": "files", "type": "local", "path": str(second)}
+        )
+        fetched = client.get("/connections/files")
+        mismatched = client.put(
+            "/connections/files", json={"name": "other", "type": "local", "path": str(second)}
+        )
+        absent = client.put(
+            "/connections/absent", json={"name": "absent", "type": "local", "path": str(second)}
+        )
+        to_sftp = client.put("/connections/files", json=_sftp(name="files"))
+        deleted = client.delete("/connections/files")
+        after_delete = client.get("/connections/files")
+        deleted_again = client.delete("/connections/files")
+        recreated = _local(client, "files", first)
+
+    assert replaced.status_code == 200
+    assert replaced.json() == {"name": "files", "type": "local", "path": str(second)}
+    assert second.is_dir()
+    assert fetched.json() == replaced.json()
+    assert mismatched.status_code == 400
+    assert mismatched.json()["error"]["code"] == "INVALID_CONNECTION_SETTINGS"
+    assert absent.status_code == 404
+    assert to_sftp.status_code == 200
+    assert to_sftp.json()["type"] == "sftp" and "password" not in to_sftp.json()
+    assert deleted.status_code == 204 and deleted.content == b""
+    assert after_delete.status_code == 404
+    assert deleted_again.status_code == 404
+    assert recreated.status_code == 201
+
+
+def test_unknown_fields_are_rejected(settings: Settings, tmp_path: Path) -> None:
+    with client_for(settings) as client:
+        response = client.post(
+            "/connections",
+            json={"name": "files", "type": "local", "path": str(tmp_path), "recursive": True},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["details"] == [
+        {"field": "recursive", "problem": "is not a recognized field"}
+    ]
+
+
+def test_sftp_accepts_the_brief_user_field(settings: Settings) -> None:
+    body = _sftp()
+    body["user"] = body.pop("username")
+    with client_for(settings) as client:
+        created = client.post("/connections", json=body)
+        missing_root = client.post("/connections", json=_sftp(name="no_root", root=None))
+    assert created.status_code == 201
+    assert created.json()["username"] == "testuser"
+    assert missing_root.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("host", "stored"),
+    [
+        ("127.0.0.1", "127.0.0.1"),
+        ("::1", "::1"),
+        ("LocalHost", "localhost"),
+        ("sftp.Example.com", "sftp.example.com"),
+    ],
+)
+def test_valid_host_names_are_stored_in_lower_case(
+    settings: Settings, host: str, stored: str
+) -> None:
+    with client_for(settings) as client:
+        response = client.post("/connections", json=_sftp(host=host))
+    assert response.status_code == 201
+    assert response.json()["host"] == stored
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["a" * 64, "bad..name", "-x.example", "exa mple", "host:22", "[::1]", "münchen.de", ""],
+)
+def test_invalid_host_names_are_rejected_at_creation(settings: Settings, host: str) -> None:
+    with client_for(settings) as client:
+        response = client.post("/connections", json=_sftp(host=host))
+    assert response.status_code == 422
+    assert [detail["field"] for detail in response.json()["error"]["details"]] == ["host"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("path", "data\nforged"),
+        ("path", "data\x00"),
+        ("path", "d" * 4097),
+        ("root", "data\rforged"),
+        ("root", "\x7f"),
+        ("username", "test\tuser"),
+    ],
+    ids=["path-newline", "path-nul", "path-too-long", "root-return", "root-delete", "user-tab"],
+)
+def test_text_settings_reject_control_characters_and_overlong_values(
+    settings: Settings, field: str, value: str
+) -> None:
+    body = (
+        {"name": "files", "type": "local", "path": value}
+        if field == "path"
+        else _sftp(**{field: value})
+    )
+    with client_for(settings) as client:
+        response = client.post("/connections", json=body)
+    assert response.status_code == 422
+    assert [detail["field"] for detail in response.json()["error"]["details"]] == [field]
 
 
 def test_encrypted_sftp_password_is_never_in_read_responses(settings: Settings) -> None:
