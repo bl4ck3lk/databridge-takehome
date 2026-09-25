@@ -27,6 +27,7 @@ include = ["databridge*"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
+pythonpath = ["scripts"]
 markers = ["integration: requires the Docker SFTP fixture"]
 
 [tool.ruff]

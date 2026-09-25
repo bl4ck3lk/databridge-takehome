@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+import sftp_fixture
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -22,7 +23,6 @@ from databridge.api import create_app
 from databridge.config import Settings
 from databridge.connectors.base import CHUNK_SIZE
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIB = 1_048_576
 
 
@@ -53,15 +53,7 @@ def _create_connections(client: TestClient, source: Path, target: Path) -> None:
     for body in (
         {"name": "source", "type": "local", "path": str(source)},
         {"name": "target", "type": "local", "path": str(target)},
-        {
-            "name": "remote",
-            "type": "sftp",
-            "host": "127.0.0.1",
-            "port": 2222,
-            "username": "testuser",
-            "password": "testpass",
-            "root": "data",
-        },
+        sftp_fixture.connection("remote"),
     ):
         response = client.post("/connections", json=body)
         if response.status_code != 201:
@@ -89,10 +81,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes-mib", type=int, nargs="+", default=[16, 256])
     args = parser.parse_args()
-    trust_file = PROJECT_ROOT / "known_hosts"
-    remote_root = PROJECT_ROOT / "sftp_data"
+    trust_file = sftp_fixture.KNOWN_HOSTS
+    remote_root = sftp_fixture.DATA_DIR
     if not trust_file.is_file() or not remote_root.is_dir():
-        parser.error("Run the README's Docker and known-hosts bootstrap first")
+        parser.error("Run make quickstart first to start and trust the local SFTP fixture")
     if any(size < 1 for size in args.sizes_mib):
         parser.error("All sizes must be positive")
 

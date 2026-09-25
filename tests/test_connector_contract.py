@@ -5,6 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import sftp_fixture
 from sftp_server import PASSWORD, USERNAME, FakeSFTPServer
 from support import read_all
 
@@ -13,8 +14,6 @@ from databridge.connectors.local import LocalConnector
 from databridge.connectors.sftp import SFTPConnector
 from databridge.errors import DataBridgeError
 from databridge.models import SFTPConnection
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sftp(port: int, root: str, known_hosts: Path) -> SFTPConnector:
@@ -44,8 +43,8 @@ def backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[tuple[Co
             known_hosts.write_text(server.known_hosts_line())
             yield _sftp(server.port, "files", known_hosts), tmp_path / "files"
     else:
-        assert (PROJECT_ROOT / "known_hosts").is_file()
-        yield _sftp(2222, "data", PROJECT_ROOT / "known_hosts"), PROJECT_ROOT / "sftp_data"
+        assert sftp_fixture.KNOWN_HOSTS.is_file(), "Run make quickstart first"
+        yield _sftp(sftp_fixture.PORT, "data", sftp_fixture.KNOWN_HOSTS), sftp_fixture.DATA_DIR
 
 
 @pytest.mark.parametrize("size", [0, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1])

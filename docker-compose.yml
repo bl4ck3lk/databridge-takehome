@@ -1,12 +1,13 @@
-name: databridge_takehome
-
+# The project name comes from COMPOSE_PROJECT_NAME, which `make quickstart` writes to .env for
+# each checkout, so two checkouts never share a container or its host-key volume.
 services:
   sftp:
     image: atmoz/sftp:alpine-3.7
     platform: linux/amd64
     ports:
-      - "127.0.0.1:2222:22"
-    command: testuser:testpass:1001
+      - "127.0.0.1:${DATABRIDGE_SFTP_PORT:-2222}:22"
+    # The container user takes the host user's UID so the bind-mounted sftp_data is writable.
+    command: testuser:testpass:${DATABRIDGE_SFTP_UID:-1001}
     volumes:
       - ./sftp_data:/home/testuser/data
       - sftp_host_keys:/etc/ssh

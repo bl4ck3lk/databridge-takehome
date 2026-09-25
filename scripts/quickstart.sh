@@ -22,30 +22,19 @@ if ! grep -q '^DATABRIDGE_ENCRYPTION_KEY=' .env; then
 fi
 ensure_env DATABRIDGE_DB_PATH "$PWD/state/databridge.sqlite3"
 ensure_env DATABRIDGE_KNOWN_HOSTS "$PWD/known_hosts"
+ensure_env DATABRIDGE_SFTP_PORT 2222
+# The fixture's user takes this UID so the bind-mounted sftp_data stays writable on Linux.
+ensure_env DATABRIDGE_SFTP_UID "$(id -u)"
+# One Compose project per checkout path, so checkouts never share a container or host keys.
+ensure_env COMPOSE_PROJECT_NAME "databridge-$(printf '%s' "$PWD" | cksum | cut -d ' ' -f 1)"
+
+set -a
+. ./.env
+set +a
 
 mkdir -p sftp_data
 docker compose up -d
-
-if [ ! -s known_hosts ]; then
-  hosts_temp="$(mktemp "${TMPDIR:-/tmp}/databridge-known-hosts.XXXXXX")"
-  attempt=0
-  host_ready=0
-  while [ "$attempt" -lt 20 ]; do
-    if ssh-keyscan -T 2 -p 2222 127.0.0.1 > "$hosts_temp" 2>/dev/null && [ -s "$hosts_temp" ]; then
-      host_ready=1
-      break
-    fi
-    attempt=$((attempt + 1))
-    sleep 1
-  done
-  if [ "$host_ready" -ne 1 ]; then
-    rm -f "$hosts_temp"
-    echo "Could not read the local SFTP server host key after 20 attempts" >&2
-    exit 1
-  fi
-  mv "$hosts_temp" known_hosts
-fi
-chmod 600 known_hosts
+sh scripts/trust_sftp_fixture.sh "$DATABRIDGE_KNOWN_HOSTS" "$DATABRIDGE_SFTP_PORT"
 
 make check
 make integration
