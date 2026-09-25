@@ -23,7 +23,9 @@ def _trust(tmp_path: Path, known_hosts: Path, *, scanned: str | None) -> Path:
     bin_dir.mkdir(exist_ok=True)
     called = tmp_path / "keyscan-called"
     stub = bin_dir / "ssh-keyscan"
-    output = f"printf '%s\\n' '{scanned}'" if scanned else "exit 1"
+    # OpenSSH's ssh-keyscan also prints "# host:port SSH-2.0-..." banner comments.
+    banner = f"# 127.0.0.1:{PORT} SSH-2.0-OpenSSH_9.6"
+    output = f"printf '%s\\n%s\\n' '{banner}' '{scanned}'" if scanned else "exit 1"
     stub.write_text(f"#!/bin/sh\ntouch '{called}'\n{output}\n")
     stub.chmod(0o755)
     subprocess.run(
@@ -43,6 +45,7 @@ def _lines(known_hosts: Path) -> list[str]:
 def test_first_run_trusts_the_scanned_key_under_both_names(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     _trust(tmp_path, known_hosts, scanned=TRUSTED)
+    # Only key lines are kept; the scanner's banner comments are dropped.
     assert sorted(_lines(known_hosts)) == sorted(
         [TRUSTED, TRUSTED.replace("[127.0.0.1]", "[localhost]")]
     )

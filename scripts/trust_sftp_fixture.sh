@@ -23,7 +23,8 @@ chmod 600 "$known_hosts"
 if ! ssh-keygen -F "$address" -f "$known_hosts" > /dev/null; then
   scanned="$(mktemp "${TMPDIR:-/tmp}/databridge-known-hosts.XXXXXX")"
   attempt=0
-  until ssh-keyscan -T 2 -p "$port" 127.0.0.1 > "$scanned" 2> /dev/null && [ -s "$scanned" ]; do
+  # Keep key lines only; ssh-keyscan also prints "#" banner comments.
+  until ssh-keyscan -T 2 -p "$port" 127.0.0.1 2> /dev/null | grep -v '^#' > "$scanned"; do
     attempt=$((attempt + 1))
     if [ "$attempt" -ge 20 ]; then
       rm -f "$scanned"
