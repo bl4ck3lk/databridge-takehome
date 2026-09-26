@@ -214,6 +214,36 @@ def test_an_extra_table_with_an_undecodable_name_does_not_stop_startup(
     assert [view.name for view in _store(settings).list_public()] == ["kept"]
 
 
+@pytest.mark.parametrize(
+    ("damage", "problem"),
+    [
+        ("DROP TABLE connections", "has no connections table"),
+        ("DROP TABLE transfers", "has no transfers table"),
+        # SQLite itself rejects the renamed table, because its primary-key index names it.
+        (
+            "UPDATE sqlite_master SET name = CAST(x'80' AS TEXT), tbl_name = CAST(x'80' AS TEXT), "
+            "sql = replace(sql, 'CREATE TABLE connections', "
+            "'CREATE TABLE \"' || CAST(x'80' AS TEXT) || '\"') WHERE name = 'connections'",
+            "is damaged",
+        ),
+    ],
+    ids=["dropped-connections", "dropped-transfers", "undecodable-rename"],
+)
+def test_a_database_without_a_required_table_is_refused(
+    settings: Settings, damage: str, problem: str
+) -> None:
+    _store(settings)
+    _rename_in_schema(settings, damage)
+
+    with pytest.raises(StartupError) as refused:
+        _store(settings)
+
+    assert str(refused.value) == (
+        f"{settings.database_path} {problem}; move it aside so the service can create a new "
+        "database"
+    )
+
+
 def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
     settings.database_path.write_bytes(b"not a SQLite database\n" * 64)
 

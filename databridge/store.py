@@ -54,6 +54,8 @@ _SCHEMA = (
     )""",
     "CREATE INDEX transfers_by_start ON transfers (started_at)",
 )
+# The tables that _SCHEMA creates besides metadata; startup checks metadata on its own.
+_REQUIRED_TABLES = (b"connections", b"transfers")
 _INTERRUPTED = {
     "copying": (
         "The service stopped before the transfer finished; the destination is unchanged, "
@@ -243,6 +245,10 @@ class ConnectionStore:
             raise self._unusable(
                 f"uses schema version {shown!r}, but this service needs version {SCHEMA_VERSION!r}"
             )
+        # A database of this schema version has every table; without one, requests would fail.
+        missing = [name.decode() for name in _REQUIRED_TABLES if name not in tables]
+        if missing:
+            raise self._unusable(f"has no {' or '.join(missing)} table")
         marker = metadata.get(b"key_check")
         # DataBridge writes the marker as an ASCII Fernet token. Any other value means a damaged
         # database, not a wrong key.
