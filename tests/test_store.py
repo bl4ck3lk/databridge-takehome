@@ -174,6 +174,46 @@ def test_a_corrupted_database_is_refused_with_its_path(settings: Settings, offse
     )
 
 
+def _rename_in_schema(settings: Settings, statement: str) -> None:
+    with closing(sqlite3.connect(settings.database_path)) as database:
+        database.execute("PRAGMA writable_schema = ON")
+        database.execute(statement)
+        database.commit()
+
+
+def test_a_schema_error_that_quotes_a_damaged_name_is_refused(settings: Settings) -> None:
+    _store(settings)
+    # SQLite reports the renamed table in its error message, which the driver cannot decode.
+    _rename_in_schema(
+        settings, "UPDATE sqlite_master SET name = CAST(x'80' AS TEXT) WHERE name = 'connections'"
+    )
+
+    with pytest.raises(StartupError) as refused:
+        _store(settings)
+
+    assert str(refused.value) == (
+        f"{settings.database_path} is damaged; move it aside so the service can create a new "
+        "database"
+    )
+
+
+def test_an_extra_table_with_an_undecodable_name_does_not_stop_startup(
+    settings: Settings,
+) -> None:
+    root = str(settings.database_path.parent)
+    _store(settings).create(LocalConnection(name="kept", type="local", path=root))
+    with closing(sqlite3.connect(settings.database_path)) as database:
+        database.execute("CREATE TABLE extra (x)")
+        database.commit()
+    _rename_in_schema(
+        settings,
+        "UPDATE sqlite_master SET name = CAST(x'80' AS TEXT), tbl_name = CAST(x'80' AS TEXT), "
+        "sql = 'CREATE TABLE \"' || CAST(x'80' AS TEXT) || '\" (x)' WHERE name = 'extra'",
+    )
+
+    assert [view.name for view in _store(settings).list_public()] == ["kept"]
+
+
 def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
     settings.database_path.write_bytes(b"not a SQLite database\n" * 64)
 

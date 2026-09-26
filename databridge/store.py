@@ -63,11 +63,6 @@ _INTERRUPTED = {
         "The service stopped while publishing; the destination may already contain the new file"
     ),
 }
-# SQLite errors that make the file itself unusable at startup, and how each is reported.
-_UNUSABLE_FILE = {
-    "SQLITE_NOTADB": "is not a SQLite database",
-    "SQLITE_CORRUPT": "is damaged",
-}
 
 
 def _now() -> str:
@@ -182,10 +177,11 @@ class ConnectionStore:
             os.close(descriptor)
         try:
             with self._connect() as connection:
-                tables = {
-                    row["name"]
+                # Names are read as bytes: a damaged name may not be UTF-8.
+                tables: set[bytes] = {
+                    row[0]
                     for row in connection.execute(
-                        "SELECT name FROM sqlite_master WHERE type='table'"
+                        "SELECT CAST(name AS BLOB) FROM sqlite_master WHERE type='table'"
                     )
                 }
                 if tables:
@@ -210,14 +206,24 @@ class ConnectionStore:
                 )
         except sqlite3.DatabaseError as exc:
             # Errors that the Python driver raises itself have no SQLite error name.
-            problem = _UNUSABLE_FILE.get(getattr(exc, "sqlite_errorname", ""))
-            if problem is None:
-                raise
-            raise StartupError(
-                f"{self.path} {problem}; move it aside so the service can create a new database"
-            ) from exc
+            name = getattr(exc, "sqlite_errorname", "")
+            if name == "SQLITE_NOTADB":
+                raise self._unusable("is not a SQLite database") from exc
+            # Extended result codes name kinds of corruption, such as SQLITE_CORRUPT_INDEX.
+            if name.startswith("SQLITE_CORRUPT"):
+                raise self._unusable("is damaged") from exc
+            raise
+        except UnicodeDecodeError as exc:
+            # The driver also decodes the error messages of SQLite. A message that quotes a
+            # damaged name cannot be decoded, so that damage arrives as UnicodeDecodeError.
+            raise self._unusable("is damaged") from exc
 
-    def _verify_existing(self, connection: sqlite3.Connection, tables: set[str]) -> None:
+    def _unusable(self, problem: str) -> StartupError:
+        return StartupError(
+            f"{self.path} {problem}; move it aside so the service can create a new database"
+        )
+
+    def _verify_existing(self, connection: sqlite3.Connection, tables: set[bytes]) -> None:
         # Read as bytes: a damaged value may not be UTF-8, and the driver raises when it decodes.
         metadata: dict[bytes, bytes | None] = (
             dict(
@@ -225,30 +231,23 @@ class ConnectionStore:
                     "SELECT CAST(key AS BLOB), CAST(value AS BLOB) FROM metadata"
                 ).fetchall()
             )
-            if "metadata" in tables
+            if b"metadata" in tables
             else {}
         )
         version = metadata.get(b"schema_version")
         if version is None:
-            raise StartupError(
-                f"{self.path} has no DataBridge schema version; move it aside so the service "
-                "can create a new database"
-            )
+            raise self._unusable("has no DataBridge schema version")
         if version != SCHEMA_VERSION.encode("ascii"):
             # The stored value is quoted, so a damaged value cannot break the one-line message.
             shown = version.decode("utf-8", "replace")
-            raise StartupError(
-                f"{self.path} uses schema version {shown!r}, but this service needs version "
-                f"{SCHEMA_VERSION!r}; move it aside so the service can create a new database"
+            raise self._unusable(
+                f"uses schema version {shown!r}, but this service needs version {SCHEMA_VERSION!r}"
             )
         marker = metadata.get(b"key_check")
         # DataBridge writes the marker as an ASCII Fernet token. Any other value means a damaged
         # database, not a wrong key.
         if not marker or not marker.isascii():
-            raise StartupError(
-                f"{self.path} has no valid DataBridge key check; move it aside so the service "
-                "can create a new database"
-            )
+            raise self._unusable("has no valid DataBridge key check")
         try:
             key_matches = self.cipher.decrypt(marker) == _KEY_CHECK
         except InvalidToken:
