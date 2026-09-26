@@ -45,13 +45,13 @@ def _wait_for_server(base: str, process: subprocess.Popen, seconds: float = 15) 
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("Uvicorn stopped before the smoke check could connect")
+            raise RuntimeError("The service stopped before the smoke check could connect")
         try:
             _request(base, "GET", "/openapi.json")
             return
         except URLError:
             time.sleep(0.1)
-    raise RuntimeError("Uvicorn did not become ready within 15 seconds")
+    raise RuntimeError("The service did not become ready within 15 seconds")
 
 
 def _hash(path: Path) -> str:
@@ -90,10 +90,10 @@ def _report_server_log(log: Path, lines: int = 40) -> None:
 
 
 def main() -> None:
-    trust_file = sftp_fixture.KNOWN_HOSTS
+    trust_file = sftp_fixture.known_hosts()
     remote_root = sftp_fixture.DATA_DIR
-    if not trust_file.is_file() or not remote_root.is_dir():
-        raise SystemExit("Run make quickstart first to start and trust the local SFTP fixture")
+    if not remote_root.is_dir():
+        raise SystemExit("Run make quickstart first to start the local SFTP fixture")
     if not (ROOT / "data" / "customers.csv").is_file():
         raise SystemExit("The committed data/customers.csv fixture is missing")
     if not (ROOT / "data" / "products.json").is_file():
@@ -115,24 +115,11 @@ def main() -> None:
                 "DATABRIDGE_KNOWN_HOSTS": str(trust_file),
             }
         )
-        server_log = Path(temp) / "uvicorn.stderr.log"
+        server_log = Path(temp) / "service.stderr.log"
         with server_log.open("wb") as log:
-            # Fixed arguments: this interpreter runs uvicorn on a port this script chose.
+            # Fixed arguments: this interpreter runs the service on a port this script chose.
             process = subprocess.Popen(  # noqa: S603
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "databridge.api:app",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(port),
-                    "--workers",
-                    "1",
-                    "--log-level",
-                    "warning",
-                ],
+                [sys.executable, "-m", "databridge", "serve", "--port", str(port)],
                 cwd=ROOT,
                 env=env,
                 stdout=subprocess.DEVNULL,

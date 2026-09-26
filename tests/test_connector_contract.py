@@ -43,8 +43,7 @@ def backend(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[tuple[Co
             known_hosts.write_text(server.known_hosts_line())
             yield _sftp(server.port, "files", known_hosts), tmp_path / "files"
     else:
-        assert sftp_fixture.KNOWN_HOSTS.is_file(), "Run make quickstart first"
-        yield _sftp(sftp_fixture.PORT, "data", sftp_fixture.KNOWN_HOSTS), sftp_fixture.DATA_DIR
+        yield _sftp(sftp_fixture.port(), "data", sftp_fixture.known_hosts()), sftp_fixture.DATA_DIR
 
 
 @pytest.mark.parametrize("size", [0, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1])

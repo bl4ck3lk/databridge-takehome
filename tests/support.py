@@ -1,20 +1,25 @@
 """Shared helpers for API tests."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from fastapi.testclient import TestClient
 
-from databridge.api import create_app
+from databridge.api import open_app
 from databridge.config import Settings
 from databridge.connectors.base import ByteSource
 
 BASE_URL = "http://127.0.0.1:8080"
 
 
-def client_for(settings: Settings) -> TestClient:
-    """Build a client that sends an allowed loopback Host header, as a local caller does."""
-    return TestClient(create_app(settings), base_url=BASE_URL)
+@contextmanager
+def client_for(settings: Settings, base_url: str = BASE_URL) -> Iterator[TestClient]:
+    """Open the service and a client for it. The default base URL sends an allowed loopback
+    Host header, as a local caller does. Leaving the block stops the service."""
+    with open_app(settings) as app, TestClient(app, base_url=base_url) as client:
+        yield client
 
 
 def read_all(source: ByteSource) -> bytes:

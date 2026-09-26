@@ -14,7 +14,7 @@ from typing import Self
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import SecretStr
 
-from databridge.errors import DataBridgeError, ErrorCode
+from databridge.errors import DataBridgeError, ErrorCode, StartupError
 from databridge.models import (
     CONNECTION_MODELS,
     Connection,
@@ -122,7 +122,7 @@ class DatabaseOwnerLock:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             os.close(descriptor)
-            raise RuntimeError(
+            raise StartupError(
                 f"Another DataBridge process is using the database locked by {self.path}; "
                 "stop that process before starting another"
             ) from None
@@ -155,10 +155,7 @@ class DatabaseOwnerLock:
 class ConnectionStore:
     def __init__(self, path: Path, encryption_key: bytes) -> None:
         self.path = path
-        try:
-            self.cipher = Fernet(encryption_key)
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY is not a valid Fernet key") from exc
+        self.cipher = Fernet(encryption_key)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -179,10 +176,20 @@ class ConnectionStore:
         finally:
             os.close(descriptor)
         with self._connect() as connection:
-            tables = {
-                row["name"]
-                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            }
+            try:
+                tables = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+            except sqlite3.DatabaseError as exc:
+                if exc.sqlite_errorname != "SQLITE_NOTADB":
+                    raise
+                raise StartupError(
+                    f"{self.path} is not a SQLite database; move it aside so the service can "
+                    "create a new database"
+                ) from exc
             if tables:
                 self._verify_existing(connection, tables)
             else:
@@ -212,21 +219,25 @@ class ConnectionStore:
         )
         version = metadata.get("schema_version")
         if version is None:
-            raise RuntimeError(
+            raise StartupError(
                 f"{self.path} has no DataBridge schema version; move it aside so the service "
                 "can create a new database"
             )
         if version != SCHEMA_VERSION:
-            raise RuntimeError(
+            raise StartupError(
                 f"{self.path} uses schema version {version}, but this service needs version "
                 f"{SCHEMA_VERSION}; move it aside so the service can create a new database"
             )
         try:
-            marker = self.cipher.decrypt(metadata["key_check"].encode("ascii"))
-        except (KeyError, InvalidToken) as exc:
-            raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database") from exc
-        if marker != _KEY_CHECK:
-            raise RuntimeError("DATABRIDGE_ENCRYPTION_KEY does not match the database")
+            key_matches = self.cipher.decrypt(metadata["key_check"].encode("ascii")) == _KEY_CHECK
+        except (KeyError, InvalidToken):
+            key_matches = False
+        if not key_matches:
+            raise StartupError(
+                f"DATABRIDGE_ENCRYPTION_KEY does not match the database {self.path}; start with "
+                "the key that created it, or move the database aside to start with no saved "
+                "connections"
+            )
 
     def create(self, item: Connection) -> ConnectionView:
         settings, ciphertext = self._columns(item)

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 import sftp_fixture
-from sftp_fixture import DATA_DIR, KNOWN_HOSTS, PROJECT_ROOT
+from sftp_fixture import DATA_DIR, PROJECT_ROOT
 from support import client_for, read_all
 
 from databridge.config import Settings
@@ -22,8 +22,7 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def trusted_settings(settings: Settings) -> Settings:
-    assert KNOWN_HOSTS.is_file(), "Run make quickstart to trust the local SFTP fixture first"
-    shutil.copyfile(KNOWN_HOSTS, settings.known_hosts_path)
+    shutil.copyfile(sftp_fixture.known_hosts(), settings.known_hosts_path)
     return settings
 
 

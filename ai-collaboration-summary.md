@@ -45,3 +45,7 @@ branch; `docs/ai-work-log.md` records that work and its checks.
 Codex later rechecked PR #1, reproduced seven remaining issues at its hosted head,
 then added regression tests and fixes with the candidate's authorization. The
 work log and verification map record the follow-up checks and benchmark.
+
+Claude Code then checked an outside review of the merged work. It confirmed four
+of the seven findings in whole or in part and fixed them test-first. The work
+log records why the other three did not hold.

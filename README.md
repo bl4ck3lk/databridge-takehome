@@ -36,7 +36,11 @@ with escape rules that quickstart does not apply.
 `127.0.0.1`, `localhost`, and `::1`.
 
 Retain `.env` across restarts. The key is required at startup and is never
-stored in SQLite. `make run` serves `http://127.0.0.1:8080` with one worker.
+stored in SQLite. `make run` runs `python -m databridge serve`, which serves
+`http://127.0.0.1:8080` from one process. The service checks the settings and
+the database before it listens. Missing or invalid settings, a key that does
+not match the database, or a second process on the same database stop it. The
+service then prints one line that names every problem.
 In another terminal, `make logs` follows the request log at
 `state/databridge.requests.jsonl`. Each JSON line includes a request ID,
 status, route, duration, and allowlisted request parameters. The SFTP password
@@ -69,10 +73,10 @@ ssh-keygen -R '[localhost]:2222' -f known_hosts
 make quickstart
 ```
 
-Use your `DATABRIDGE_SFTP_PORT` if it is not 2222. A checkout that started the
-fixture before per-checkout project names used the Compose project
-`databridge_takehome`; stop it with `docker compose -p databridge_takehome down`
-and remove its entries as above before rerunning quickstart.
+Use your `DATABRIDGE_SFTP_PORT` if it is not 2222. `make integration`,
+`make smoke`, and `make benchmark` read the fixture's port and trust file from
+`.env`. They stop when either is missing, because a guessed port can reach the
+fixture of another checkout.
 
 The image is linux/amd64; on ARM Docker engines it runs under emulation.
 
@@ -218,7 +222,8 @@ describes who directed and produced the work.
 
 This is a localhost, trusted-development API with one shared namespace and no
 caller authentication or tenant isolation. Multiple callers can use it, but all
-have the same access. A shared deployment would need authenticated tenant
+have the same access. A shared deployment would need TLS, because SFTP
+passwords travel in request bodies. It would also need authenticated tenant
 identity, tenant-scoped storage and file roots, authorization, and network
 controls for user-supplied SFTP hosts. An instance per tenant is a simpler
 alternative. Transfers are synchronous and do not resume after interruption. A

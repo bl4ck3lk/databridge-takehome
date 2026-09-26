@@ -97,3 +97,11 @@ class DataBridgeError(Exception):
         self.code = code
         self.message = message
         self.transfer_id = transfer_id
+
+
+class StartupError(Exception):
+    """A setting or database condition that stops the service before it serves a request.
+
+    The message names each problem and its correction. The command line prints the message as
+    one line. Any other exception during startup is a defect, and it keeps its traceback.
+    """

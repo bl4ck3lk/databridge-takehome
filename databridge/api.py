@@ -1,8 +1,8 @@
-"""HTTP application: routes, error mapping, and the OpenAPI contract."""
+"""HTTP application: its startup resources, routes, error mapping, and the OpenAPI contract."""
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, Query, Request, Response, status
@@ -181,37 +181,36 @@ def _published_openapi(application: FastAPI) -> Callable[[], dict[str, Any]]:
     return openapi
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Build an app instance so tests can control its lifecycle and settings."""
+@contextmanager
+def open_app(settings: Settings) -> Iterator[FastAPI]:
+    """Take the database lock, verify the database, and open the request log. Then yield the
+    app that uses them. Leaving the block closes the log and releases the lock.
 
-    @asynccontextmanager
-    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        effective = settings if settings is not None else Settings.from_env()
-        with DatabaseOwnerLock(effective.lock_path):
-            store = ConnectionStore(effective.database_path, effective.encryption_key)
-            store.initialize()
-            request_log = RequestLog(effective.request_log_path)
-            request_log.open()
-            context = ConnectorContext(known_hosts_path=effective.known_hosts_path)
-            application.state.store = store
-            application.state.settings = effective
-            application.state.connector_context = context
-            application.state.transfers = TransferService(
-                store, lambda connection: open_connector(connection, context)
-            )
-            application.state.request_log = request_log
-            try:
-                yield
-            finally:
-                request_log.close()
+    These steps run before a server starts, not in the ASGI lifespan. Thus a database problem
+    is one StartupError, not a lifespan failure with a traceback.
+    """
+    with DatabaseOwnerLock(settings.lock_path):
+        store = ConnectionStore(settings.database_path, settings.encryption_key)
+        store.initialize()
+        request_log = RequestLog(settings.request_log_path)
+        request_log.open()
+        try:
+            yield _application(settings, store, request_log)
+        finally:
+            request_log.close()
 
-    application = FastAPI(
-        title="DataBridge",
-        version="0.1.0",
-        lifespan=lifespan,
-        strict_content_type=True,
+
+def _application(settings: Settings, store: ConnectionStore, request_log: RequestLog) -> FastAPI:
+    context = ConnectorContext(known_hosts_path=settings.known_hosts_path)
+    application = FastAPI(title="DataBridge", version="0.1.0", strict_content_type=True)
+    application.state.store = store
+    application.state.connector_context = context
+    application.state.transfers = TransferService(
+        store, lambda connection: open_connector(connection, context)
     )
-    application.add_middleware(RequestContextMiddleware)
+    application.add_middleware(
+        RequestContextMiddleware, allowed_hosts=settings.allowed_hosts, request_log=request_log
+    )
     application.openapi = _published_openapi(application)  # type: ignore[method-assign]
 
     @application.exception_handler(DataBridgeError)
@@ -488,6 +487,3 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return _store(request).get_transfer(transfer_id)
 
     return application
-
-
-app = create_app()

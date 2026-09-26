@@ -9,11 +9,10 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from support import client_for, read_all
 
-from databridge.api import create_app
 from databridge.config import Settings
 from databridge.connectors import base
 from databridge.connectors.local import LocalConnector
-from databridge.errors import DataBridgeError
+from databridge.errors import DataBridgeError, StartupError
 
 
 def test_local_connection_persists_and_lists_files(settings: Settings, tmp_path: Path) -> None:
@@ -262,15 +261,8 @@ def test_wrong_key_fails_startup_even_without_sftp_connections(settings: Setting
         encryption_key=Fernet.generate_key(),
         known_hosts_path=settings.known_hosts_path,
     )
-    with pytest.raises(RuntimeError, match="does not match the database"):
+    with pytest.raises(StartupError, match="does not match the database"):
         with client_for(wrong):
-            pass
-
-
-def test_missing_key_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DATABRIDGE_ENCRYPTION_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="DATABRIDGE_ENCRYPTION_KEY is required"):
-        with TestClient(create_app()):
             pass
 
 
