@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from support import BASE_URL, client_for, request_events
 
-from databridge.api import create_app
+from databridge.api import open_app
 from databridge.config import Settings
 from databridge.errors import DataBridgeError, ErrorCode
 from databridge.models import ErrorResponse
@@ -48,14 +48,13 @@ def test_every_error_code_has_an_http_error_status() -> None:
 
 
 def test_unhandled_exception_returns_error_envelope_with_request_id(settings: Settings) -> None:
-    app = create_app(settings)
-
     def explode() -> None:
         raise RuntimeError("internal detail that must not leak")
 
-    app.add_api_route("/explode", explode)
-    with TestClient(app, base_url=BASE_URL) as client:
-        response = client.get("/explode")
+    with open_app(settings) as app:
+        app.add_api_route("/explode", explode)
+        with TestClient(app, base_url=BASE_URL) as client:
+            response = client.get("/explode")
 
     assert response.status_code == 500
     assert response.headers["content-type"] == "application/json"
@@ -69,14 +68,13 @@ def test_unhandled_exception_returns_error_envelope_with_request_id(settings: Se
 
 
 def test_domain_error_status_follows_its_code(settings: Settings) -> None:
-    app = create_app(settings)
-
     def unavailable() -> None:
         raise DataBridgeError(ErrorCode.CONNECTION_ROOT_UNAVAILABLE, "Root is unavailable")
 
-    app.add_api_route("/unavailable", unavailable)
-    with TestClient(app, base_url=BASE_URL) as client:
-        response = client.get("/unavailable")
+    with open_app(settings) as app:
+        app.add_api_route("/unavailable", unavailable)
+        with TestClient(app, base_url=BASE_URL) as client:
+            response = client.get("/unavailable")
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "CONNECTION_ROOT_UNAVAILABLE"
@@ -276,7 +274,7 @@ def test_openapi_documents_reachable_statuses_and_error_codes(settings: Settings
     "base_url", ["http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"]
 )
 def test_loopback_host_names_are_served(settings: Settings, base_url: str) -> None:
-    with TestClient(create_app(settings), base_url=base_url) as client:
+    with client_for(settings, base_url) as client:
         assert client.get("/connections").status_code == 200
 
 
@@ -284,7 +282,7 @@ def test_foreign_host_header_is_rejected_before_any_side_effect(
     settings: Settings, tmp_path: Path
 ) -> None:
     target = tmp_path / "rebound"
-    with TestClient(create_app(settings), base_url="http://attacker.example:8080") as client:
+    with client_for(settings, "http://attacker.example:8080") as client:
         response = client.post("/connections", json=_local("rebound", target))
         listing = client.get("/connections")
 

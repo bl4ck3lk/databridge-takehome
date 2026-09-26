@@ -36,7 +36,11 @@ with escape rules that quickstart does not apply.
 `127.0.0.1`, `localhost`, and `::1`.
 
 Retain `.env` across restarts. The key is required at startup and is never
-stored in SQLite. `make run` serves `http://127.0.0.1:8080` with one worker.
+stored in SQLite. `make run` runs `python -m databridge serve`, which serves
+`http://127.0.0.1:8080` from one process. The service checks the settings and
+the database before it listens. Missing or invalid settings, a key that does
+not match the database, or a second process on the same database stop it. The
+service then prints one line that names every problem.
 In another terminal, `make logs` follows the request log at
 `state/databridge.requests.jsonl`. Each JSON line includes a request ID,
 status, route, duration, and allowlisted request parameters. The SFTP password

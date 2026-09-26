@@ -23,7 +23,7 @@ import sftp_fixture
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from databridge.api import create_app
+from databridge.api import open_app
 from databridge.config import Settings
 from databridge.connectors.base import CHUNK_SIZE
 
@@ -231,7 +231,10 @@ def main() -> None:
             known_hosts = base / "known_hosts"
             _trust_relays(trust_file, [relay.port for relay in relays.values()], known_hosts)
             settings = Settings(base / "state.sqlite3", Fernet.generate_key(), known_hosts)
-            with TestClient(create_app(settings), base_url="http://127.0.0.1") as client:
+            with (
+                open_app(settings) as app,
+                TestClient(app, base_url="http://127.0.0.1") as client,
+            ):
                 _create_connections(client, source_root, target_root)
                 for round_trip, relay in relays.items():
                     response = client.post(

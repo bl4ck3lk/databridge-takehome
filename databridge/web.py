@@ -12,9 +12,9 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from databridge.config import DEFAULT_ALLOWED_HOSTS
 from databridge.errors import ErrorCode
 from databridge.models import ErrorDetail, ErrorResponse, FieldProblem
+from databridge.request_log import RequestLog
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _STATE_CHANGING_METHODS = frozenset({"DELETE", "PATCH", "POST", "PUT"})
@@ -81,8 +81,12 @@ class RequestContextMiddleware:
     the same-origin check blocks cross-site forms and scripts from changing state.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(
+        self, app: ASGIApp, *, allowed_hosts: frozenset[str], request_log: RequestLog
+    ) -> None:
         self.app = app
+        self._allowed_hosts = allowed_hosts
+        self._request_log = request_log
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -123,13 +127,10 @@ class RequestContextMiddleware:
         finally:
             self._log(scope, state, request_id, response_status or 500, started)
 
-    @staticmethod
-    def _rejection(scope: Scope) -> tuple[ErrorCode, str] | None:
-        settings = getattr(scope["app"].state, "settings", None)
-        allowed_hosts = settings.allowed_hosts if settings is not None else DEFAULT_ALLOWED_HOSTS
+    def _rejection(self, scope: Scope) -> tuple[ErrorCode, str] | None:
         headers = Headers(scope=scope)
         host = headers.get("host", "")
-        if _host_name(host) not in allowed_hosts:
+        if _host_name(host) not in self._allowed_hosts:
             return (
                 ErrorCode.INVALID_HOST_HEADER,
                 "The Host header must name this local service, for example 127.0.0.1",
@@ -146,13 +147,9 @@ class RequestContextMiddleware:
             )
         return None
 
-    @staticmethod
     def _log(
-        scope: Scope, state: dict[str, Any], request_id: str, status: int, started: float
+        self, scope: Scope, state: dict[str, Any], request_id: str, status: int, started: float
     ) -> None:
-        request_log = getattr(scope["app"].state, "request_log", None)
-        if request_log is None:
-            return
         route = scope.get("route")
         event: dict[str, object] = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -171,6 +168,6 @@ class RequestContextMiddleware:
             if value := state.get(key):
                 event[key] = value
         try:
-            request_log.write(event)
+            self._request_log.write(event)
         except OSError:
             _logger.error("request_log_write_failed request_id=%s", request_id)

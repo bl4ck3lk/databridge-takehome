@@ -12,7 +12,7 @@ from support import client_for
 
 from databridge import store as store_module
 from databridge.config import Settings
-from databridge.errors import DataBridgeError, ErrorCode
+from databridge.errors import DataBridgeError, ErrorCode, StartupError
 from databridge.models import LocalConnection, TransferRequest
 from databridge.store import ConnectionStore, DatabaseOwnerLock
 
@@ -47,9 +47,13 @@ def test_new_state_directory_and_database_are_owner_only(tmp_path: Path) -> None
 
 def test_second_process_cannot_own_the_database(settings: Settings) -> None:
     with client_for(settings):
-        with pytest.raises(RuntimeError, match="Another DataBridge process is using"):
+        with pytest.raises(StartupError) as refused:
             with client_for(settings):
                 pass
+    assert str(refused.value) == (
+        f"Another DataBridge process is using the database locked by {settings.lock_path}; "
+        "stop that process before starting another"
+    )
 
     with client_for(settings) as restarted:
         assert restarted.get("/connections").status_code == 200
@@ -126,7 +130,7 @@ def test_database_from_another_schema_version_is_refused(settings: Settings) -> 
     with sqlite3.connect(settings.database_path) as database:
         database.execute("UPDATE metadata SET value = '0' WHERE key = 'schema_version'")
 
-    with pytest.raises(RuntimeError, match="schema version 0"):
+    with pytest.raises(StartupError, match="schema version 0"):
         _store(settings)
 
 
@@ -134,8 +138,35 @@ def test_database_without_a_schema_version_is_refused(settings: Settings) -> Non
     with sqlite3.connect(settings.database_path) as database:
         database.execute("CREATE TABLE connections (name TEXT PRIMARY KEY)")
 
-    with pytest.raises(RuntimeError, match="has no DataBridge schema version"):
+    with pytest.raises(StartupError, match="has no DataBridge schema version"):
         _store(settings)
+
+
+def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
+    settings.database_path.write_bytes(b"not a SQLite database\n" * 64)
+
+    with pytest.raises(StartupError) as refused:
+        _store(settings)
+
+    assert str(refused.value) == (
+        f"{settings.database_path} is not a SQLite database; move it aside so the service can "
+        "create a new database"
+    )
+
+
+def test_a_different_key_is_refused_with_the_database_it_does_not_match(
+    settings: Settings,
+) -> None:
+    _store(settings)
+
+    with pytest.raises(StartupError) as refused:
+        ConnectionStore(settings.database_path, Fernet.generate_key()).initialize()
+
+    assert str(refused.value) == (
+        f"DATABRIDGE_ENCRYPTION_KEY does not match the database {settings.database_path}; start "
+        "with the key that created it, or move the database aside to start with no saved "
+        "connections"
+    )
 
 
 def _completed(store: ConnectionStore, transfer_id: str, size: int) -> None:

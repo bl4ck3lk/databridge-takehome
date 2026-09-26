@@ -45,13 +45,13 @@ def _wait_for_server(base: str, process: subprocess.Popen, seconds: float = 15) 
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError("Uvicorn stopped before the smoke check could connect")
+            raise RuntimeError("The service stopped before the smoke check could connect")
         try:
             _request(base, "GET", "/openapi.json")
             return
         except URLError:
             time.sleep(0.1)
-    raise RuntimeError("Uvicorn did not become ready within 15 seconds")
+    raise RuntimeError("The service did not become ready within 15 seconds")
 
 
 def _hash(path: Path) -> str:
@@ -115,24 +115,11 @@ def main() -> None:
                 "DATABRIDGE_KNOWN_HOSTS": str(trust_file),
             }
         )
-        server_log = Path(temp) / "uvicorn.stderr.log"
+        server_log = Path(temp) / "service.stderr.log"
         with server_log.open("wb") as log:
-            # Fixed arguments: this interpreter runs uvicorn on a port this script chose.
+            # Fixed arguments: this interpreter runs the service on a port this script chose.
             process = subprocess.Popen(  # noqa: S603
-                [
-                    sys.executable,
-                    "-m",
-                    "uvicorn",
-                    "databridge.api:app",
-                    "--host",
-                    "127.0.0.1",
-                    "--port",
-                    str(port),
-                    "--workers",
-                    "1",
-                    "--log-level",
-                    "warning",
-                ],
+                [sys.executable, "-m", "databridge", "serve", "--port", str(port)],
                 cwd=ROOT,
                 env=env,
                 stdout=subprocess.DEVNULL,
