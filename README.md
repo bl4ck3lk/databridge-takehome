@@ -222,7 +222,8 @@ describes who directed and produced the work.
 
 This is a localhost, trusted-development API with one shared namespace and no
 caller authentication or tenant isolation. Multiple callers can use it, but all
-have the same access. A shared deployment would need authenticated tenant
+have the same access. A shared deployment would need TLS, because SFTP
+passwords travel in request bodies. It would also need authenticated tenant
 identity, tenant-scoped storage and file roots, authorization, and network
 controls for user-supplied SFTP hosts. An instance per tenant is a simpler
 alternative. Transfers are synchronous and do not resume after interruption. A
