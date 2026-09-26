@@ -90,6 +90,8 @@ class _DelayRelay:
 
     def __init__(self, round_trip_ms: int) -> None:
         self._delay = round_trip_ms / 2000
+        # Resolved here, in the caller's thread, so a missing setting fails the caller.
+        self._upstream = (sftp_fixture.HOST, sftp_fixture.port())
         self._listener = socket.create_server((sftp_fixture.HOST, 0))
         self.port = int(self._listener.getsockname()[1])
         threading.Thread(target=self._accept, daemon=True).start()
@@ -103,7 +105,7 @@ class _DelayRelay:
                 client, _address = self._listener.accept()
             except OSError:
                 return
-            upstream = socket.create_connection((sftp_fixture.HOST, sftp_fixture.PORT))
+            upstream = socket.create_connection(self._upstream)
             self._relay(client, upstream)
             self._relay(upstream, client)
 
@@ -130,7 +132,7 @@ class _DelayRelay:
 
 def _trust_relays(trust_file: Path, relay_ports: list[int], path: Path) -> None:
     """Trust each relay port with the fixture's already-trusted keys; no new key is accepted."""
-    fixture = f"[{sftp_fixture.HOST}]:{sftp_fixture.PORT} "
+    fixture = f"[{sftp_fixture.HOST}]:{sftp_fixture.port()} "
     lines = trust_file.read_text().splitlines()
     trusted = [line for line in lines if line.startswith(fixture)]
     if not trusted:
@@ -208,10 +210,10 @@ def main() -> None:
         help="added round-trip times, each measured with the first size through a delaying relay",
     )
     args = parser.parse_args()
-    trust_file = sftp_fixture.KNOWN_HOSTS
+    trust_file = sftp_fixture.known_hosts()
     remote_root = sftp_fixture.DATA_DIR
-    if not trust_file.is_file() or not remote_root.is_dir():
-        parser.error("Run make quickstart first to start and trust the local SFTP fixture")
+    if not remote_root.is_dir():
+        parser.error("Run make quickstart first to start the local SFTP fixture")
     if any(size < 1 for size in args.sizes_mib):
         parser.error("All sizes must be positive")
     if any(round_trip < 1 for round_trip in args.round_trip_ms):

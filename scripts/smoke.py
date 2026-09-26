@@ -90,10 +90,10 @@ def _report_server_log(log: Path, lines: int = 40) -> None:
 
 
 def main() -> None:
-    trust_file = sftp_fixture.KNOWN_HOSTS
+    trust_file = sftp_fixture.known_hosts()
     remote_root = sftp_fixture.DATA_DIR
-    if not trust_file.is_file() or not remote_root.is_dir():
-        raise SystemExit("Run make quickstart first to start and trust the local SFTP fixture")
+    if not remote_root.is_dir():
+        raise SystemExit("Run make quickstart first to start the local SFTP fixture")
     if not (ROOT / "data" / "customers.csv").is_file():
         raise SystemExit("The committed data/customers.csv fixture is missing")
     if not (ROOT / "data" / "products.json").is_file():
