@@ -154,6 +154,31 @@ def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "UPDATE metadata SET value = 'clé' WHERE key = 'key_check'",
+        "UPDATE metadata SET value = x'00ff' WHERE key = 'key_check'",
+        "DELETE FROM metadata WHERE key = 'key_check'",
+    ],
+    ids=["non-ascii-text", "blob", "missing"],
+)
+def test_a_damaged_key_check_is_refused_with_the_database_path(
+    settings: Settings, damage: str
+) -> None:
+    _store(settings)
+    with sqlite3.connect(settings.database_path) as database:
+        database.execute(damage)
+
+    with pytest.raises(StartupError) as refused:
+        _store(settings)
+
+    assert str(refused.value) == (
+        f"{settings.database_path} has no valid DataBridge key check; move it aside so the "
+        "service can create a new database"
+    )
+
+
 def test_a_different_key_is_refused_with_the_database_it_does_not_match(
     settings: Settings,
 ) -> None:
