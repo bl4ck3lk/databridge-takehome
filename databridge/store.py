@@ -63,6 +63,11 @@ _INTERRUPTED = {
         "The service stopped while publishing; the destination may already contain the new file"
     ),
 }
+# SQLite errors that make the file itself unusable at startup, and how each is reported.
+_UNUSABLE_FILE = {
+    "SQLITE_NOTADB": "is not a SQLite database",
+    "SQLITE_CORRUPT": "is damaged",
+}
 
 
 def _now() -> str:
@@ -175,69 +180,77 @@ class ConnectionStore:
             os.fchmod(descriptor, 0o600)
         finally:
             os.close(descriptor)
-        with self._connect() as connection:
-            try:
+        try:
+            with self._connect() as connection:
                 tables = {
                     row["name"]
                     for row in connection.execute(
                         "SELECT name FROM sqlite_master WHERE type='table'"
                     )
                 }
-            except sqlite3.DatabaseError as exc:
-                if exc.sqlite_errorname != "SQLITE_NOTADB":
-                    raise
-                raise StartupError(
-                    f"{self.path} is not a SQLite database; move it aside so the service can "
-                    "create a new database"
-                ) from exc
-            if tables:
-                self._verify_existing(connection, tables)
-            else:
-                for statement in _SCHEMA:
-                    connection.execute(statement)
-                connection.executemany(
-                    "INSERT INTO metadata (key, value) VALUES (?, ?)",
-                    (
-                        ("schema_version", SCHEMA_VERSION),
-                        ("key_check", self.cipher.encrypt(_KEY_CHECK).decode("ascii")),
-                    ),
+                if tables:
+                    self._verify_existing(connection, tables)
+                else:
+                    for statement in _SCHEMA:
+                        connection.execute(statement)
+                    connection.executemany(
+                        "INSERT INTO metadata (key, value) VALUES (?, ?)",
+                        (
+                            ("schema_version", SCHEMA_VERSION),
+                            ("key_check", self.cipher.encrypt(_KEY_CHECK).decode("ascii")),
+                        ),
+                    )
+                connection.execute(
+                    """UPDATE transfers
+                    SET status = 'failed', updated_at = :now, failed_at = :now,
+                        failure_phase = 'interruption', error_code = :code,
+                        error = CASE status WHEN 'publishing' THEN :publishing ELSE :copying END
+                    WHERE status IN ('running', 'publishing')""",
+                    {"now": _now(), "code": ErrorCode.TRANSFER_INTERRUPTED.value, **_INTERRUPTED},
                 )
-            connection.execute(
-                """UPDATE transfers
-                SET status = 'failed', updated_at = :now, failed_at = :now,
-                    failure_phase = 'interruption', error_code = :code,
-                    error = CASE status WHEN 'publishing' THEN :publishing ELSE :copying END
-                WHERE status IN ('running', 'publishing')""",
-                {"now": _now(), "code": ErrorCode.TRANSFER_INTERRUPTED.value, **_INTERRUPTED},
-            )
+        except sqlite3.DatabaseError as exc:
+            # Errors that the Python driver raises itself have no SQLite error name.
+            problem = _UNUSABLE_FILE.get(getattr(exc, "sqlite_errorname", ""))
+            if problem is None:
+                raise
+            raise StartupError(
+                f"{self.path} {problem}; move it aside so the service can create a new database"
+            ) from exc
 
     def _verify_existing(self, connection: sqlite3.Connection, tables: set[str]) -> None:
-        metadata = (
-            dict(connection.execute("SELECT key, value FROM metadata").fetchall())
+        # Read as bytes: a damaged value may not be UTF-8, and the driver raises when it decodes.
+        metadata: dict[bytes, bytes | None] = (
+            dict(
+                connection.execute(
+                    "SELECT CAST(key AS BLOB), CAST(value AS BLOB) FROM metadata"
+                ).fetchall()
+            )
             if "metadata" in tables
             else {}
         )
-        version = metadata.get("schema_version")
+        version = metadata.get(b"schema_version")
         if version is None:
             raise StartupError(
                 f"{self.path} has no DataBridge schema version; move it aside so the service "
                 "can create a new database"
             )
-        if version != SCHEMA_VERSION:
+        if version != SCHEMA_VERSION.encode("ascii"):
+            # The stored value is quoted, so a damaged value cannot break the one-line message.
+            shown = version.decode("utf-8", "replace")
             raise StartupError(
-                f"{self.path} uses schema version {version}, but this service needs version "
-                f"{SCHEMA_VERSION}; move it aside so the service can create a new database"
+                f"{self.path} uses schema version {shown!r}, but this service needs version "
+                f"{SCHEMA_VERSION!r}; move it aside so the service can create a new database"
             )
-        marker = metadata.get("key_check")
+        marker = metadata.get(b"key_check")
         # DataBridge writes the marker as an ASCII Fernet token. Any other value means a damaged
-        # database, not a wrong key; a SQLite TEXT column can also hold a BLOB.
-        if not isinstance(marker, str) or not marker.isascii():
+        # database, not a wrong key.
+        if not marker or not marker.isascii():
             raise StartupError(
                 f"{self.path} has no valid DataBridge key check; move it aside so the service "
                 "can create a new database"
             )
         try:
-            key_matches = self.cipher.decrypt(marker.encode("ascii")) == _KEY_CHECK
+            key_matches = self.cipher.decrypt(marker) == _KEY_CHECK
         except InvalidToken:
             key_matches = False
         if not key_matches:

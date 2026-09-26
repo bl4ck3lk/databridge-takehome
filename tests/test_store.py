@@ -125,13 +125,29 @@ def test_store_initialization_closes_descriptor_when_chmod_fails(
         os.fstat(descriptor[0])
 
 
-def test_database_from_another_schema_version_is_refused(settings: Settings) -> None:
+@pytest.mark.parametrize(
+    ("stored", "shown"),
+    [("'0'", "'0'"), ("CAST(x'80' AS TEXT)", "'�'"), ("'1' || char(10) || '2'", "'1\\n2'")],
+    ids=["other-version", "undecodable", "newline"],
+)
+def test_database_from_another_schema_version_is_refused(
+    settings: Settings, stored: str, shown: str
+) -> None:
     _store(settings)
     with sqlite3.connect(settings.database_path) as database:
-        database.execute("UPDATE metadata SET value = '0' WHERE key = 'schema_version'")
+        # The parametrized values are fixed SQL expressions in this test, not input.
+        database.execute(
+            f"UPDATE metadata SET value = {stored} WHERE key = 'schema_version'"  # noqa: S608
+        )
 
-    with pytest.raises(StartupError, match="schema version 0"):
+    with pytest.raises(StartupError) as refused:
         _store(settings)
+
+    # The stored value is quoted, so a damaged value cannot break the one-line message.
+    assert str(refused.value) == (
+        f"{settings.database_path} uses schema version {shown}, but this service needs version "
+        "'1'; move it aside so the service can create a new database"
+    )
 
 
 def test_database_without_a_schema_version_is_refused(settings: Settings) -> None:
@@ -140,6 +156,22 @@ def test_database_without_a_schema_version_is_refused(settings: Settings) -> Non
 
     with pytest.raises(StartupError, match="has no DataBridge schema version"):
         _store(settings)
+
+
+@pytest.mark.parametrize("offset", [120, 4096], ids=["schema-page", "table-page"])
+def test_a_corrupted_database_is_refused_with_its_path(settings: Settings, offset: int) -> None:
+    _store(settings)
+    with settings.database_path.open("r+b") as database:
+        database.seek(offset)
+        database.write(b"\xff" * 400)
+
+    with pytest.raises(StartupError) as refused:
+        _store(settings)
+
+    assert str(refused.value) == (
+        f"{settings.database_path} is damaged; move it aside so the service can create a new "
+        "database"
+    )
 
 
 def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
@@ -158,10 +190,12 @@ def test_a_file_that_is_not_a_database_is_refused(settings: Settings) -> None:
     "damage",
     [
         "UPDATE metadata SET value = 'clé' WHERE key = 'key_check'",
+        "UPDATE metadata SET value = CAST(x'80' AS TEXT) WHERE key = 'key_check'",
         "UPDATE metadata SET value = x'00ff' WHERE key = 'key_check'",
+        "UPDATE metadata SET value = '' WHERE key = 'key_check'",
         "DELETE FROM metadata WHERE key = 'key_check'",
     ],
-    ids=["non-ascii-text", "blob", "missing"],
+    ids=["non-ascii-text", "undecodable-text", "blob", "empty", "missing"],
 )
 def test_a_damaged_key_check_is_refused_with_the_database_path(
     settings: Settings, damage: str
