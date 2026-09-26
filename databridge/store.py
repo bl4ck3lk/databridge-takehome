@@ -228,9 +228,17 @@ class ConnectionStore:
                 f"{self.path} uses schema version {version}, but this service needs version "
                 f"{SCHEMA_VERSION}; move it aside so the service can create a new database"
             )
+        marker = metadata.get("key_check")
+        # DataBridge writes the marker as an ASCII Fernet token. Any other value means a damaged
+        # database, not a wrong key; a SQLite TEXT column can also hold a BLOB.
+        if not isinstance(marker, str) or not marker.isascii():
+            raise StartupError(
+                f"{self.path} has no valid DataBridge key check; move it aside so the service "
+                "can create a new database"
+            )
         try:
-            key_matches = self.cipher.decrypt(metadata["key_check"].encode("ascii")) == _KEY_CHECK
-        except (KeyError, InvalidToken):
+            key_matches = self.cipher.decrypt(marker.encode("ascii")) == _KEY_CHECK
+        except InvalidToken:
             key_matches = False
         if not key_matches:
             raise StartupError(
